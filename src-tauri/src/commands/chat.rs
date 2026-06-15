@@ -17,11 +17,10 @@ pub struct SendMessageResponse {
 
 #[tauri::command]
 pub async fn send_message(
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
     request: SendMessageRequest,
 ) -> Result<SendMessageResponse, String> {
     log::info!("send_message: agent={}, content={:?}", request.agent_type, request.content.chars().take(50).collect::<String>());
-    // TODO: route to appropriate agent pipeline
     Ok(SendMessageResponse {
         message_id: uuid::Uuid::new_v4().to_string(),
         content: format!("Echo: {}", request.content),
@@ -31,7 +30,7 @@ pub async fn send_message(
 
 #[tauri::command]
 pub async fn stream_message(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     request: SendMessageRequest,
 ) -> Result<(), String> {
     // TODO: implement streaming via events

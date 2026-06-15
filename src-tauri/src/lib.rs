@@ -1,13 +1,11 @@
 mod commands;
 mod pipeline;
 
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppState {
-    pub pipeline: pipeline::SharedPipelineState,
+    pub pipeline: Arc<Mutex<pipeline::PipelineState>>,
     pub db_path: String,
 }
 
@@ -19,15 +17,6 @@ impl AppState {
             db_path: String::new(),
         }
     }
-}
-
-#[tauri::command]
-pub fn get_app_info(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
-    Ok(serde_json::json!({
-        "name": "Omega Agent",
-        "version": "0.1.0",
-        "pipeline_status": "idle",
-    }))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -48,7 +37,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            get_app_info,
             commands::chat::send_message,
             commands::chat::stream_message,
             commands::tools::execute_tool,
