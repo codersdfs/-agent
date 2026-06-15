@@ -4,3 +4,6 @@ pub mod gate;
 pub mod tables;
 pub mod memory;
 pub mod mcp;
+pub mod plan_cmd;
+pub mod build_cmd;
+pub mod review_cmd;

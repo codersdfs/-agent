@@ -4,7 +4,7 @@ use crate::AppState;
 use std::path::PathBuf;
 use regex::Regex;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolRequest {
     pub tool: String,
     pub args: serde_json::Value,

@@ -127,6 +127,34 @@ impl RulesDatabase {
         group.all_rules().iter().any(|(r, _)| r.pattern == pattern && r.promoted)
     }
 
+    /// Demote rules that are promoted but have low frequency (stale).
+    /// Returns the number of demoted rules.
+    pub fn demote_stale_rules(&mut self, lang: &Language) -> usize {
+        let key = lang.to_key();
+        let mut demoted = 0;
+        if let Some(group) = self.languages.get_mut(&key) {
+            for rules in [
+                &mut group.structural,
+                &mut group.taste,
+                &mut group.golden,
+                &mut group.repeated,
+                &mut group.frontend,
+                &mut group.backend,
+                &mut group.data,
+            ] {
+                for rule in rules.iter_mut() {
+                    // Demote promoted rules that have frequency == 0 (seeded defaults)
+                    // or that were promoted but never triggered again
+                    if rule.promoted && rule.frequency < 2 {
+                        rule.promoted = false;
+                        demoted += 1;
+                    }
+                }
+            }
+        }
+        demoted
+    }
+
     fn seed_defaults(&mut self) {
         let rust = self.languages.entry("rust".into()).or_insert_with(CategoryGroup::new);
         rust.structural.push(RuleEntry {

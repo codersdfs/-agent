@@ -1,17 +1,23 @@
-use crate::MemoryEntry;
+use crate::{MemoryLayer, MemoryStore};
 
-pub struct SessionMemory;
+pub struct SessionMemory<'a> {
+    store: &'a MemoryStore,
+}
 
-impl SessionMemory {
-    pub fn new() -> Self {
-        Self
+impl<'a> SessionMemory<'a> {
+    pub fn new(store: &'a MemoryStore) -> Self {
+        Self { store }
     }
 
-    pub fn store(&self, _entry: MemoryEntry) -> Result<String, String> {
-        Ok(uuid::Uuid::new_v4().to_string())
+    pub fn store(&self, key: &str, value: &str) -> Result<String, String> {
+        self.store.store(MemoryLayer::Session, key, value)
     }
 
-    pub fn search(&self, _query: &str) -> Result<Vec<MemoryEntry>, String> {
-        Ok(vec![])
+    pub fn search(&self, query: &str, limit: usize) -> Result<crate::SearchResult, String> {
+        self.store.search(query, Some("session"), limit)
+    }
+
+    pub fn remember(&self, key: &str) -> Result<Option<String>, String> {
+        self.store.remember(key, Some("session"))
     }
 }

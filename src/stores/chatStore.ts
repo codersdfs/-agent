@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { listen } from '@tauri-apps/api/event'
 import type { UnlistenFn } from '@tauri-apps/api/event'
-import type { GateViolation } from '../lib/tauri'
+import type { GateViolation, BuildSessionEntry, PermissionRequest, BuildProgress, ScoreBreakdown, PromotionStats } from '../lib/tauri'
 
 export interface Message {
   id: string
@@ -41,6 +41,15 @@ interface ChatState {
   gateViolations: GateViolation[]
   promotedRules: string[]
   pipelineStatus: string
+  buildSession: BuildSessionEntry[]
+  permissionRequest: PermissionRequest | null
+  buildProgress: BuildProgress | null
+  buildInProgress: boolean
+  buildAutoApprove: boolean
+  scoreBreakdown: ScoreBreakdown | null
+  promotionStats: PromotionStats | null
+  retryCount: number
+  maxRetries: number
 
   sendMessage: (content: string, agentType?: string) => Promise<void>
   appendMessage: (msg: Message) => void
@@ -52,6 +61,16 @@ interface ChatState {
   setReviewMode: (mode: ReviewMode) => void
   setGateViolations: (v: GateViolation[]) => void
   setPromotedRules: (r: string[]) => void
+  setBuildSession: (v: BuildSessionEntry[]) => void
+  setPermissionRequest: (v: PermissionRequest | null) => void
+  setBuildProgress: (v: BuildProgress | null) => void
+  setBuildInProgress: (v: boolean) => void
+  setBuildAutoApprove: (v: boolean) => void
+  setScoreBreakdown: (v: ScoreBreakdown | null) => void
+  setPromotionStats: (v: PromotionStats | null) => void
+  setRetryCount: (v: number) => void
+  setMaxRetries: (v: number) => void
+  setupBuildListeners: () => Promise<UnlistenFn[]>
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -79,6 +98,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
   gateViolations: [],
   promotedRules: [],
   pipelineStatus: 'Idle',
+  buildSession: [],
+  permissionRequest: null,
+  buildProgress: null,
+  buildInProgress: false,
+  buildAutoApprove: false,
+  scoreBreakdown: null,
+  promotionStats: null,
+  retryCount: 0,
+  maxRetries: 3,
 
   appendMessage: (msg) => {
     set((s) => ({ messages: [...s.messages, msg] }))
@@ -97,6 +125,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setGateViolations: (v) => set({ gateViolations: v }),
 
   setPromotedRules: (r) => set({ promotedRules: r }),
+
+  setBuildSession: (v) => set({ buildSession: v }),
+
+  setPermissionRequest: (v) => set({ permissionRequest: v }),
+
+  setBuildProgress: (v) => set({ buildProgress: v }),
+
+  setBuildInProgress: (v) => set({ buildInProgress: v }),
+
+  setBuildAutoApprove: (v) => set({ buildAutoApprove: v }),
+
+  setScoreBreakdown: (v) => set({ scoreBreakdown: v }),
+
+  setPromotionStats: (v) => set({ promotionStats: v }),
+
+  setRetryCount: (v) => set({ retryCount: v }),
+
+  setMaxRetries: (v) => set({ maxRetries: v }),
 
   clearMessages: () => {
     set({
@@ -230,5 +276,84 @@ If Gate violations appear, fix them before proceeding.`
         pipelineStatus: s.pipelineStatus === 'Failed' ? 'Failed' : 'Idle',
       }))
     }
+  },
+
+  setupBuildListeners: async () => {
+    const { listen } = await import('@tauri-apps/api/event')
+
+    const unlistenStepStart = await listen<{
+      step_index: number
+      step_id: number
+      description: string
+      action: string
+      file_path: string | null
+    }>('build-step-start', (event) => {
+      const p = event.payload
+      set((s) => ({
+        buildProgress: {
+          total_steps: s.buildProgress?.total_steps ?? 0,
+          completed_steps: s.buildProgress?.completed_steps ?? 0,
+          current_step: p.step_index,
+          status: `Executing: ${p.description}`,
+          total_retries: s.buildProgress?.total_retries ?? 0,
+        },
+        pipelineStatus: 'Building',
+      }))
+    })
+
+    const unlistenStepEnd = await listen<{
+      step_index: number
+      status: string
+      gate_passed: boolean | null
+      gate_score: number | null
+      duration_ms: number
+    }>('build-step-end', async (event) => {
+      const p = event.payload
+      set((s) => ({
+        buildProgress: s.buildProgress ? {
+          ...s.buildProgress,
+          completed_steps: s.buildProgress.completed_steps + (p.status === 'completed' ? 1 : 0),
+          current_step: s.buildProgress.current_step + 1,
+          status: p.status === 'denied' ? 'Permission denied' : `Step ${p.status}`,
+        } : null,
+      }))
+      // Refresh session log
+      const { getBuildSession } = await import('../lib/tauri')
+      getBuildSession().then((session) => set({ buildSession: session })).catch(() => {})
+    })
+
+    const unlistenPerm = await listen<PermissionRequest>('build-permission-request', (event) => {
+      set({ permissionRequest: event.payload })
+    })
+
+    const unlistenToolExec = await listen<{
+      tool: string
+      attempt: number
+      max_retries: number
+    }>('build-tool-exec', (event) => {
+      const p = event.payload
+      set((s) => ({
+        buildProgress: s.buildProgress ? {
+          ...s.buildProgress,
+          total_retries: p.attempt > 1 ? s.buildProgress.total_retries + 1 : s.buildProgress.total_retries,
+          status: `Tool: ${p.tool} (attempt ${p.attempt}/${p.max_retries})`,
+        } : null,
+      }))
+    })
+
+    const unlistenComplete = await listen<{
+      total_steps: number
+      completed_steps: number
+      duration_ms_total: number
+    }>('build-complete', () => {
+      set({
+        buildInProgress: false,
+        permissionRequest: null,
+        pipelineStatus: 'Completed',
+        buildProgress: null,
+      })
+    })
+
+    return [unlistenStepStart, unlistenStepEnd, unlistenPerm, unlistenToolExec, unlistenComplete]
   },
 }))

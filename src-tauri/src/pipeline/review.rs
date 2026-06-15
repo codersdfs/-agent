@@ -1,8 +1,14 @@
-use crate::commands::tools::GateCheckResult;
 use crate::commands::tools::GateViolationInfo;
+use crate::pipeline::review_score::{aggregate_scores, ScoreBreakdown, PromotionStats};
 use crate::AppState;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CombinedReviewOutput {
+    pub gate_violations: Vec<GateViolationInfo>,
+    pub llm_review: Option<String>,
+    pub score_breakdown: ScoreBreakdown,
+}
 
 pub struct ReviewAgent;
 
@@ -12,7 +18,6 @@ impl ReviewAgent {
     }
 
     /// Run Gate check (always on, synchronous, fast).
-    /// Returns violations and score.
     pub fn gate_check(state: &AppState, content: &str) -> Vec<GateViolationInfo> {
         let db = state.rules_db.lock().unwrap();
         let lang = state.detected_language.lock().unwrap().clone();
@@ -30,7 +35,7 @@ impl ReviewAgent {
         }).collect()
     }
 
-    /// Run LLM review (togglable). Calls the configured provider for review.
+    /// Run LLM review (togglable).
     pub async fn llm_review(
         state: &AppState,
         code: &str,
@@ -46,7 +51,7 @@ impl ReviewAgent {
             5. Architectural problems\n\n\
             Context: {}\n\n\
             Code:\n```\n{}\n```\n\n\
-            Provide specific, actionable feedback. Include what, where, and how to fix.",
+            Provide specific, actionable feedback. Use 'Error:' prefix for critical issues, 'Warning:' prefix for recommendations.",
             context, code
         );
 
@@ -65,16 +70,15 @@ impl ReviewAgent {
         Ok(response.content)
     }
 
-    /// Combined review: Gate + LLM (if mode permits).
-    /// Returns (gate_violations, llm_review_comment, score, passed).
+    /// Combined review: Gate + LLM (if mode permits) with score aggregation.
     pub async fn combined_review(
         state: &AppState,
         code: &str,
         context: &str,
-    ) -> (Vec<GateViolationInfo>, Option<String>, u32, bool) {
+    ) -> CombinedReviewOutput {
         let gate_violations = Self::gate_check(state, code);
 
-        // Score gate violations
+        // Convert to harness violations for scoring
         let har_violations: Vec<harness::Violation> = gate_violations.iter().map(|v| {
             let cat = match v.category.to_lowercase().as_str() {
                 "structural" => harness::ViolationCategory::Structural,
@@ -94,18 +98,62 @@ impl ReviewAgent {
         let gate_result = harness::scoring::calculate_score(&har_violations);
 
         let config = state.review_config.lock().unwrap().clone();
-        let llm_output = match config.mode {
-            crate::pipeline::ReviewMode::Off => None,
+        let pass_threshold = 80;
+
+        let (llm_review, llm_review_str) = match config.mode {
+            crate::pipeline::ReviewMode::Off => (None, None),
             _ => {
                 match Self::llm_review(state, code, context).await {
-                    Ok(review) => {
-                        if review.len() > 50 { Some(review) } else { None }
+                    Ok(review) if review.len() > 50 => {
+                        (Some(review.clone()), Some(review))
                     }
-                    Err(e) => Some(format!("LLM review failed: {}", e)),
+                    Ok(_) => (None, None),
+                    Err(e) => (Some(format!("LLM review failed: {}", e)), None),
                 }
             }
         };
 
-        (gate_violations, llm_output, gate_result.score, gate_result.passed)
+        let score_breakdown = aggregate_scores(
+            gate_result.score,
+            llm_review_str.as_deref(),
+            &gate_violations,
+            pass_threshold,
+        );
+
+        CombinedReviewOutput {
+            gate_violations,
+            llm_review,
+            score_breakdown,
+        }
+    }
+
+    /// Get promotion statistics from the rules database.
+    pub fn get_promotion_stats(state: &AppState) -> PromotionStats {
+        let db = state.rules_db.lock().unwrap();
+        let lang = state.detected_language.lock().unwrap().clone();
+        let group = db.load_for_language(&lang);
+
+        let all: Vec<_> = group.all_rules();
+        let total = all.len();
+        let promoted = all.iter().filter(|(r, _)| r.promoted).count();
+        let f1 = all.iter().filter(|(r, _)| r.frequency == 1).count();
+        let f2 = all.iter().filter(|(r, _)| r.frequency == 2).count();
+        let f3p = all.iter().filter(|(r, _)| r.frequency >= 3).count();
+
+        PromotionStats {
+            total_patterns: total,
+            promoted,
+            frequency_1: f1,
+            frequency_2: f2,
+            frequency_3_plus: f3p,
+            demoted_last_run: 0,
+        }
+    }
+
+    /// Demote stale rules that haven't been triggered in many sessions.
+    pub fn demote_stale_rules(state: &AppState) -> usize {
+        let mut db = state.rules_db.lock().unwrap();
+        let lang = state.detected_language.lock().unwrap().clone();
+        db.demote_stale_rules(&lang)
     }
 }

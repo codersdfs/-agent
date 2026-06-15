@@ -2,15 +2,21 @@ import { useState } from 'react'
 import { ChatPanel } from './components/ChatPanel'
 import { SettingsPanel } from './components/SettingsPanel'
 import { ReviewPanel } from './components/ReviewPanel'
+import { PlanPanel } from './components/PlanPanel'
+import { BuildPanel } from './components/BuildPanel'
+import { MemoryPanel } from './components/MemoryPanel'
 
-type View = 'chat' | 'review' | 'settings'
+type View = 'chat' | 'plan' | 'build' | 'review' | 'settings' | 'memory'
 
 export default function App() {
   const [activeView, setActiveView] = useState<View>('chat')
 
   const views: { id: View; label: string }[] = [
     { id: 'chat', label: 'Chat' },
+    { id: 'plan', label: 'Plan' },
+    { id: 'build', label: 'Build' },
     { id: 'review', label: 'Review' },
+    { id: 'memory', label: 'Memory' },
     { id: 'settings', label: 'Settings' },
   ]
 
@@ -45,7 +51,10 @@ export default function App() {
 
       <main className="flex-1 flex flex-col min-w-0">
         {activeView === 'chat' && <ChatPanel />}
+        {activeView === 'plan' && <PlanPanel />}
+        {activeView === 'build' && <BuildPanel />}
         {activeView === 'review' && <ReviewPanel />}
+        {activeView === 'memory' && <MemoryPanel />}
         {activeView === 'settings' && <SettingsPanel />}
       </main>
     </div>
