@@ -1,4 +1,4 @@
-# Omega Agent
+# Ohm Agent
 
 **Multi-agent AI coding assistant** — orchestrates Plan, Build, and Code Review agents through a Rust backend with Mechanized Gate enforcement, entropy garbage collection, negative knowledge feedback, and structured table memory.
 
