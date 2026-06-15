@@ -7,7 +7,6 @@ const STRUCTURAL_PENALTY: u32 = 15;
 const TASTE_PENALTY: u32 = 10;
 const GOLDEN_PENALTY: u32 = 20;
 const REPEATED_PENALTY: u32 = 25;
-const PASS_THRESHOLD: u32 = 80;
 
 pub fn calculate_score(violations: &[Violation]) -> GateResult {
     let mut score = BASE_SCORE;

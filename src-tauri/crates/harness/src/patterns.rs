@@ -13,6 +13,9 @@ pub struct NegativePattern {
 pub fn check_patterns(content: &str, patterns: &[NegativePattern]) -> Vec<Violation> {
     let mut violations = vec![];
     for pattern in patterns {
+        if !pattern.promoted && pattern.frequency < 3 {
+            continue;
+        }
         if content.contains(pattern.pattern) {
             violations.push(Violation {
                 category: pattern.category.clone(),

@@ -1,26 +1,26 @@
-use crate::{ChatRequest, ChatResponse, LlmProvider};
+use crate::{ChatRequest, ChatResponse, LlmProvider, StreamChunk};
 
 pub struct GoogleProvider {
     api_key: String,
+    base_url: String,
 }
 
 impl GoogleProvider {
-    pub fn new(api_key: String) -> Self {
-        Self { api_key }
+    pub fn new(api_key: String, base_url: Option<String>) -> Self {
+        Self {
+            api_key,
+            base_url: base_url.unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".into()),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl LlmProvider for GoogleProvider {
     async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, String> {
-        Ok(ChatResponse {
-            content: "Google response".into(),
-            model: "gemini-2".into(),
-            usage: None,
-        })
+        Err("Google provider not yet implemented".into())
     }
 
-    async fn chat_stream(&self, _request: ChatRequest) -> Result<String, String> {
-        Ok("streamed".into())
+    async fn chat_stream(&self, _request: ChatRequest, _tx: tokio::sync::mpsc::UnboundedSender<StreamChunk>) -> Result<(), String> {
+        Err("Google streaming not yet implemented".into())
     }
 }

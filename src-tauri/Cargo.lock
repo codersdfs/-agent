@@ -1448,8 +1448,10 @@ name = "harness"
 version = "0.1.0"
 dependencies = [
  "log",
+ "regex",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2458,6 +2460,7 @@ dependencies = [
  "chrono",
  "directories",
  "entropy",
+ "glob",
  "harness",
  "log",
  "mcp",
@@ -2475,6 +2478,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tokio",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]
@@ -2836,6 +2840,7 @@ name = "providers"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "log",
  "reqwest 0.12.28",
  "serde",

@@ -1,26 +1,25 @@
-use crate::{ChatRequest, ChatResponse, LlmProvider};
+use crate::{ChatRequest, ChatResponse, LlmProvider, StreamChunk};
+use crate::openai::OpenAIProvider;
 
 pub struct LocalProvider {
-    base_url: String,
+    inner: OpenAIProvider,
 }
 
 impl LocalProvider {
     pub fn new(base_url: String) -> Self {
-        Self { base_url }
+        Self {
+            inner: OpenAIProvider::new(String::new(), base_url),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl LlmProvider for LocalProvider {
-    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, String> {
-        Ok(ChatResponse {
-            content: "Local response".into(),
-            model: "local".into(),
-            usage: None,
-        })
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, String> {
+        self.inner.chat(request).await
     }
 
-    async fn chat_stream(&self, _request: ChatRequest) -> Result<String, String> {
-        Ok("streamed".into())
+    async fn chat_stream(&self, request: ChatRequest, tx: tokio::sync::mpsc::UnboundedSender<StreamChunk>) -> Result<(), String> {
+        self.inner.chat_stream(request, tx).await
     }
 }

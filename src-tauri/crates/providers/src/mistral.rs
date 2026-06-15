@@ -1,26 +1,20 @@
-use crate::{ChatRequest, ChatResponse, LlmProvider};
+use crate::{ChatRequest, ChatResponse, LlmProvider, StreamChunk};
 
-pub struct MistralProvider {
-    api_key: String,
-}
+pub struct MistralProvider;
 
 impl MistralProvider {
-    pub fn new(api_key: String) -> Self {
-        Self { api_key }
+    pub fn new(_api_key: String, _base_url: Option<String>) -> Self {
+        Self
     }
 }
 
 #[async_trait::async_trait]
 impl LlmProvider for MistralProvider {
     async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, String> {
-        Ok(ChatResponse {
-            content: "Mistral response".into(),
-            model: "mistral-large".into(),
-            usage: None,
-        })
+        Err("Mistral provider not yet implemented".into())
     }
 
-    async fn chat_stream(&self, _request: ChatRequest) -> Result<String, String> {
-        Ok("streamed".into())
+    async fn chat_stream(&self, _request: ChatRequest, _tx: tokio::sync::mpsc::UnboundedSender<StreamChunk>) -> Result<(), String> {
+        Err("Mistral streaming not yet implemented".into())
     }
 }
