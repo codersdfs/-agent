@@ -3,7 +3,6 @@ use crate::commands::tools::{ToolRequest, ToolResult, GateViolationInfo};
 use crate::pipeline::plan::StructuredPlan;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use tauri::Emitter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildSessionEntry {
@@ -47,19 +46,16 @@ impl BuildAgent {
         Self
     }
 
-    /// Execute the full build pipeline from a plan.
-    /// Orchestrates tool calls with permissions, Gate retry loop, and session logging.
     pub async fn execute_plan(
         &self,
         state: &AppState,
         plan: &StructuredPlan,
-        app_handle: &tauri::AppHandle,
     ) -> Result<Vec<BuildSessionEntry>, String> {
         let mut session: Vec<BuildSessionEntry> = vec![];
 
         log::info!("BuildAgent: executing plan with {} steps", plan.steps.len());
+        println!("[build] executing plan with {} steps", plan.steps.len());
 
-        // Set pipeline status
         {
             let mut p = state.pipeline.lock().await;
             p.status = crate::pipeline::PipelineStatus::Building;
@@ -67,25 +63,15 @@ impl BuildAgent {
         }
 
         for (step_idx, step) in plan.steps.iter().enumerate() {
-            log::info!("BuildAgent: executing step {}/{}: {}", step_idx + 1, plan.steps.len(), step.description);
+            log::info!("BuildAgent: step {}/{}: {}", step_idx + 1, plan.steps.len(), step.description);
+            println!("[build] step {}/{}: {}", step_idx + 1, plan.steps.len(), step.description);
 
-            // Update pipeline state
             {
                 let mut p = state.pipeline.lock().await;
                 p.current_step_index = step_idx;
                 p.status = crate::pipeline::PipelineStatus::Building;
             }
 
-            // Emit build step start event
-            let _ = app_handle.emit("build-step-start", serde_json::json!({
-                "step_index": step_idx,
-                "step_id": step.id,
-                "description": step.description,
-                "action": step.action,
-                "file_path": step.file_path,
-            }));
-
-            // Check if this step needs permission (write/edit/bash)
             let needs_permission = matches!(step.action.as_str(), "create" | "modify" | "delete");
             if needs_permission {
                 let perm_req = PermissionRequest {
@@ -103,12 +89,10 @@ impl BuildAgent {
                     step_description: step.description.clone(),
                 };
 
-                let _ = app_handle.emit("build-permission-request", &perm_req);
-
-                // Wait for permission response (frontend sends via respond_permission command)
-                let approved = Self::wait_for_permission(&state, &perm_req.id).await;
+                println!("[build] permission: {} (y/n)", perm_req.reason);
+                let approved = Self::wait_for_permission(state).await;
                 if !approved {
-                    let entry = BuildSessionEntry {
+                    session.push(BuildSessionEntry {
                         step_index: step_idx,
                         tool: perm_req.tool,
                         args: perm_req.args,
@@ -121,23 +105,17 @@ impl BuildAgent {
                         retries: 0,
                         timestamp_start: chrono::Utc::now().to_rfc3339(),
                         timestamp_end: chrono::Utc::now().to_rfc3339(),
-                    };
-                    session.push(entry);
-                    let _ = app_handle.emit("build-step-end", serde_json::json!({
-                        "step_index": step_idx,
-                        "status": "denied",
-                    }));
+                    });
+                    println!("[build] step {}: denied", step_idx);
                     continue;
                 }
             }
 
-            // Construct the tool request from the plan step
             let tool_req = Self::step_to_tool_request(state, step).await;
             let start = Instant::now();
             let start_ts = chrono::Utc::now().to_rfc3339();
 
-            // Execute with Gate retry loop
-            let result = Self::execute_tool_with_retry(state, tool_req.clone(), app_handle, 3).await;
+            let result = Self::execute_tool_with_retry(state, tool_req.clone(), 3).await;
             let duration_ms = start.elapsed().as_millis() as u64;
             let end_ts = chrono::Utc::now().to_rfc3339();
 
@@ -157,18 +135,10 @@ impl BuildAgent {
             };
 
             let status = if result.success { "completed" } else { "failed" };
-            let _ = app_handle.emit("build-step-end", serde_json::json!({
-                "step_index": step_idx,
-                "status": status,
-                "gate_passed": entry.gate_passed,
-                "gate_score": entry.gate_score,
-                "duration_ms": duration_ms,
-            }));
-
+            println!("[build] step {}: {} (gate {:?} score {:?} {}ms)", step_idx, status, entry.gate_passed, entry.gate_score, duration_ms);
             session.push(entry);
         }
 
-        // Update pipeline state and session log
         {
             let mut p = state.pipeline.lock().await;
             p.status = crate::pipeline::PipelineStatus::Idle;
@@ -179,27 +149,21 @@ impl BuildAgent {
             *log = session.clone();
         }
 
-        let _ = app_handle.emit("build-complete", serde_json::json!({
-            "total_steps": plan.steps.len(),
-            "completed_steps": session.iter().filter(|e| e.success).count(),
-            "duration_ms_total": session.iter().map(|e| e.duration_ms).sum::<u64>(),
-        }));
+        let completed = session.iter().filter(|e| e.success).count();
+        let total_ms: u64 = session.iter().map(|e| e.duration_ms).sum();
+        println!("[build] complete: {}/{} steps, {}ms total", completed, plan.steps.len(), total_ms);
 
         Ok(session)
     }
 
-    /// Execute a single tool call with Gate retry loop.
     async fn execute_tool_with_retry(
         state: &AppState,
         tool_req: ToolRequest,
-        app_handle: &tauri::AppHandle,
         max_retries: u8,
     ) -> ToolResult {
         let mut last_violations: Vec<GateViolationInfo> = vec![];
 
         for attempt in 0..=max_retries {
-            log::info!("BuildAgent: tool={}, attempt={}/{}", tool_req.tool, attempt + 1, max_retries + 1);
-
             let mut args = tool_req.args.clone();
             if attempt > 0 && !last_violations.is_empty() {
                 let feedback: Vec<String> = last_violations.iter()
@@ -211,31 +175,23 @@ impl BuildAgent {
             }
 
             let req = ToolRequest { tool: tool_req.tool.clone(), args: args.clone() };
-            let _ = app_handle.emit("build-tool-exec", serde_json::json!({
-                "tool": req.tool,
-                "attempt": attempt + 1,
-                "max_retries": max_retries + 1,
-            }));
+            println!("[build] tool={} attempt={}/{}", req.tool, attempt + 1, max_retries + 1);
 
             let result = match crate::commands::tools::execute_tool_inner(state, req).await {
                 Ok(r) => r,
                 Err(e) => {
-                    log::error!("BuildAgent: tool={} error on attempt {}: {}", tool_req.tool, attempt + 1, e);
                     if attempt < max_retries {
                         if let Some(obj) = args.as_object_mut() {
                             obj.insert("_error_feedback".into(), serde_json::Value::String(format!("Previous attempt failed: {}", e)));
                         }
                         continue;
                     }
-                    return ToolResult {
-                        success: false, output: String::new(), error: Some(e), gate_result: None,
-                    };
+                    return ToolResult { success: false, output: String::new(), error: Some(e), gate_result: None };
                 }
             };
 
-            match &result {
-                ToolResult { success: true, gate_result: Some(g), .. } if g.passed => {
-                    log::info!("BuildAgent: tool={} passed Gate on attempt {}", tool_req.tool, attempt + 1);
+            match result {
+                ToolResult { success: true, gate_result: Some(ref g), .. } if g.passed => {
                     for v in &g.violations {
                         let mut db = state.rules_db.lock().unwrap();
                         let lang = state.detected_language.lock().unwrap().clone();
@@ -243,41 +199,24 @@ impl BuildAgent {
                             db.promote_or_increment(&lang, &v.category.to_lowercase(), pattern, &v.message, "error");
                         }
                     }
-                    let _ = app_handle.emit("build-tool-result", serde_json::json!({
-                        "tool": tool_req.tool,
-                        "success": true,
-                        "gate_passed": true,
-                        "attempt": attempt + 1,
-                    }));
+                    println!("[build] tool={} passed gate (score={}) on attempt {}", tool_req.tool, g.score, attempt + 1);
                     return result;
                 }
-                ToolResult { success: true, gate_result: Some(g), .. } => {
+                ToolResult { success: true, gate_result: Some(ref g), .. } => {
                     last_violations = g.violations.clone();
-                    log::warn!("BuildAgent: tool={} failed Gate on attempt {} (score={})", tool_req.tool, attempt + 1, g.score);
-                    let _ = app_handle.emit("build-tool-result", serde_json::json!({
-                        "tool": tool_req.tool,
-                        "success": true,
-                        "gate_passed": false,
-                        "gate_score": g.score,
-                        "violations": g.violations,
-                        "attempt": attempt + 1,
-                    }));
+                    println!("[build] tool={} failed gate (score={}) on attempt {}", tool_req.tool, g.score, attempt + 1);
                 }
-                ToolResult { success: false, error: Some(e), .. } => {
-                    log::error!("BuildAgent: tool={} failed on attempt {}: {}", tool_req.tool, attempt + 1, e);
-                    if attempt < max_retries {
-                        if let Some(obj) = args.as_object_mut() {
-                            obj.insert("_error_feedback".into(), serde_json::Value::String(format!("Previous attempt failed: {}", e)));
+                ToolResult { success: false, ref error, .. } => {
+                    if let Some(ref e) = error {
+                        if attempt < max_retries {
+                            if let Some(obj) = args.as_object_mut() {
+                                obj.insert("_error_feedback".into(), serde_json::Value::String(format!("Previous attempt failed: {}", e)));
+                            }
+                            continue;
                         }
-                        continue;
+                        println!("[build] tool={} failed after {} attempts: {}", tool_req.tool, attempt + 1, e);
+                        return result;
                     }
-                    let _ = app_handle.emit("build-tool-result", serde_json::json!({
-                        "tool": tool_req.tool,
-                        "success": false,
-                        "error": e,
-                        "attempt": attempt + 1,
-                    }));
-                    return result;
                 }
                 _ => return result,
             }
@@ -291,78 +230,43 @@ impl BuildAgent {
         }
     }
 
-    /// Convert a plan step into a tool request.
     async fn step_to_tool_request(_state: &AppState, step: &crate::pipeline::plan::PlanStep) -> ToolRequest {
         match step.action.as_str() {
-            "create" | "modify" => {
-                // For create/modify, we need to read the file first to construct a write/edit
-                let tool = "write";
-                let args = serde_json::json!({
+            "create" | "modify" => ToolRequest {
+                tool: "write".into(),
+                args: serde_json::json!({
                     "filePath": step.file_path,
-                    "content": "", // LLM will fill this
+                    "content": "",
                     "_step_description": step.description,
-                });
-                ToolRequest {
-                    tool: tool.into(),
-                    args,
-                }
-            }
-            "delete" => {
-                ToolRequest {
-                    tool: "bash".into(),
-                    args: serde_json::json!({
-                        "command": format!("Remove-Item -LiteralPath \"{}\"", step.file_path.as_deref().unwrap_or("")),
-                    }),
-                }
-            }
-            "refactor" | "test" => {
-                ToolRequest {
-                    tool: "bash".into(),
-                    args: serde_json::json!({
-                        "command": step.description,
-                    }),
-                }
-            }
-            _ => {
-                ToolRequest {
-                    tool: "bash".into(),
-                    args: serde_json::json!({
-                        "command": step.description,
-                    }),
-                }
-            }
+                }),
+            },
+            "delete" => ToolRequest {
+                tool: "bash".into(),
+                args: serde_json::json!({
+                    "command": format!("Remove-Item -LiteralPath \"{}\"", step.file_path.as_deref().unwrap_or("")),
+                }),
+            },
+            _ => ToolRequest {
+                tool: "bash".into(),
+                args: serde_json::json!({ "command": step.description }),
+            },
         }
     }
 
-    /// Wait for user to approve/deny a permission request.
-    async fn wait_for_permission(state: &AppState, request_id: &str) -> bool {
-        // Check if auto-approve is configured
-        let auto_approve = state.build_config.lock().unwrap().auto_approve;
-        if auto_approve {
+    async fn wait_for_permission(state: &AppState) -> bool {
+        if state.build_config.lock().unwrap().auto_approve {
             return true;
         }
-
-        // Register the pending permission
-        let key = request_id.to_string();
-        {
-            let mut pending = state.pending_permissions.lock().unwrap();
-            pending.insert(key.clone());
-        }
-
-        // Wait up to 120 seconds for a response
-        let mut elapsed = 0u64;
-        while elapsed < 120 {
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            elapsed += 1;
-
-            let pending = state.pending_permissions.lock().unwrap();
-            if !pending.contains(&key) {
-                // Permission was responded to (removed from set)
-                return state.permission_results.lock().unwrap().get(&key).copied().unwrap_or(false);
+        use std::io::{stdin, stdout, Write};
+        print!("> Allow? (y/n): ");
+        let _ = stdout().flush();
+        let mut line = String::new();
+        match stdin().read_line(&mut line) {
+            Ok(_) => {
+                let trimmed = line.trim().to_lowercase();
+                trimmed == "y" || trimmed == "yes"
             }
+            Err(_) => false,
         }
-
-        // Timeout — deny
-        false
     }
 }

@@ -25,6 +25,59 @@ pub enum ProviderKind {
     Local,
 }
 
+impl std::fmt::Display for ProviderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAI => "openai",
+            Self::Google => "google",
+            Self::Mistral => "mistral",
+            Self::XAI => "xai",
+            Self::Cerebras => "cerebras",
+            Self::Azure => "azure",
+            Self::Bedrock => "bedrock",
+            Self::HuggingFace => "huggingface",
+            Self::Groq => "groq",
+            Self::Kimi => "kimi",
+            Self::MiniMax => "minimax",
+            Self::OpenRouter => "openrouter",
+            Self::Local => "local",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+impl ProviderKind {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "anthropic" => Self::Anthropic,
+            "openai" => Self::OpenAI,
+            "google" => Self::Google,
+            "mistral" => Self::Mistral,
+            "xai" => Self::XAI,
+            "cerebras" => Self::Cerebras,
+            "azure" => Self::Azure,
+            "bedrock" => Self::Bedrock,
+            "huggingface" => Self::HuggingFace,
+            "groq" => Self::Groq,
+            "kimi" => Self::Kimi,
+            "minimax" => Self::MiniMax,
+            "openrouter" => Self::OpenRouter,
+            "local" => Self::Local,
+            _ => Self::OpenAI,
+        }
+    }
+
+    pub fn all() -> Vec<Self> {
+        vec![
+            Self::Anthropic, Self::OpenAI, Self::Google, Self::Mistral,
+            Self::XAI, Self::Cerebras, Self::Azure, Self::Bedrock,
+            Self::HuggingFace, Self::Groq, Self::Kimi, Self::MiniMax,
+            Self::OpenRouter, Self::Local,
+        ]
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub kind: ProviderKind,

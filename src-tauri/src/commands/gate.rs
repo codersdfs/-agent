@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tauri::State;
 use crate::AppState;
 use crate::commands::tools::GateCheckResult;
 use crate::commands::tools::GateViolationInfo;
@@ -20,9 +19,8 @@ pub struct RuleEntry {
     pub frequency: u32,
 }
 
-#[tauri::command]
 pub async fn check_gate(
-    state: State<'_, AppState>,
+    state: &AppState,
     request: GateCheckRequest,
 ) -> Result<GateCheckResult, String> {
     log::info!("check_gate: content_len={}, context={:?}", request.content.len(), request.context.chars().take(50).collect::<String>());
@@ -54,9 +52,8 @@ pub async fn check_gate(
     })
 }
 
-#[tauri::command]
 pub async fn get_rules(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<Vec<String>, String> {
     let db = state.rules_db.lock().unwrap();
     let lang = state.detected_language.lock().unwrap().clone();
@@ -73,18 +70,16 @@ pub async fn get_rules(
     Ok(entries)
 }
 
-#[tauri::command]
 pub async fn reset_rules(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<String, String> {
     let mut db = state.rules_db.lock().unwrap();
     *db = harness::rules::RulesDatabase::new();
     Ok("Rules database reset to defaults".into())
 }
 
-#[tauri::command]
 pub async fn set_review_mode(
-    state: State<'_, AppState>,
+    state: &AppState,
     mode: String,
 ) -> Result<String, String> {
     let mut config = state.review_config.lock().unwrap();

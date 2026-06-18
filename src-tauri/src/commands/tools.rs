@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tauri::State;
 use crate::AppState;
 use std::path::PathBuf;
 use regex::Regex;
@@ -158,7 +157,6 @@ fn run_glob(pattern: &str, path: Option<&str>) -> Result<String, String> {
     Ok(paths.join("\n"))
 }
 
-/// Inner fn — no Tauri state wrapper, used by BuildAgent retry loop.
 pub async fn execute_tool_inner(
     state: &AppState,
     request: ToolRequest,
@@ -259,7 +257,6 @@ pub async fn execute_tool_inner(
         }
     };
 
-    // Auto-promote violations from write/edit
     if matches!(request.tool.as_str(), "write" | "edit") {
         if let Some(ref g) = result.gate_result {
             if !g.passed {
@@ -278,16 +275,14 @@ pub async fn execute_tool_inner(
     Ok(result)
 }
 
-#[tauri::command]
 pub async fn execute_tool(
-    state: State<'_, AppState>,
+    state: &AppState,
     request: ToolRequest,
 ) -> Result<ToolResult, String> {
-    execute_tool_inner(&state, request).await
+    execute_tool_inner(state, request).await
 }
 
-#[tauri::command]
-pub async fn list_tools() -> Result<Vec<String>, String> {
+pub fn list_tools() -> Result<Vec<String>, String> {
     Ok(vec![
         "read".into(),
         "write".into(),

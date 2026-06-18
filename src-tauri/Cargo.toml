@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/harness", "crates/entropy", "crates/omega-table", "crates/providers", "crates/memory", "crates/mcp"]
+members = ["crates/harness", "crates/entropy", "crates/omega-table",
+           "crates/providers", "crates/memory", "crates/mcp"]
 
 [package]
 name = "omega-agent"
@@ -13,20 +14,12 @@ rust-version = "1.77.2"
 
 [lib]
 name = "omega_agent_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
-[build-dependencies]
-tauri-build = { version = "2" }
+crate-type = ["lib"]
 
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2" }
-tauri-plugin-log = "2"
-tauri-plugin-shell = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
 tokio = { version = "1", features = ["full"] }
 regex = "1.0"
 uuid = { version = "1", features = ["v4"] }
@@ -34,6 +27,10 @@ chrono = "0.4"
 directories = "5"
 walkdir = "2"
 glob = "0.3"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+colored = "3"
+env_logger = "0.11"
 
 harness = { path = "crates/harness" }
 entropy = { path = "crates/entropy" }

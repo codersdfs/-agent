@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tauri::State;
 use crate::AppState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,9 +21,8 @@ pub struct MemorySearchResponse {
     pub relevance: Vec<f64>,
 }
 
-#[tauri::command]
 pub async fn memory_store(
-    state: State<'_, AppState>,
+    state: &AppState,
     request: MemoryStoreRequest,
 ) -> Result<String, String> {
     log::info!("memory_store: key={}, layer={}", request.key, request.layer);
@@ -34,9 +32,8 @@ pub async fn memory_store(
     store.store(layer, &request.key, &request.value)
 }
 
-#[tauri::command]
 pub async fn memory_search(
-    state: State<'_, AppState>,
+    state: &AppState,
     request: MemorySearchRequest,
 ) -> Result<MemorySearchResponse, String> {
     log::info!("memory_search: query={}", request.query);
@@ -50,9 +47,8 @@ pub async fn memory_search(
     })
 }
 
-#[tauri::command]
 pub async fn memory_remember(
-    state: State<'_, AppState>,
+    state: &AppState,
     key: String,
     layer: Option<String>,
 ) -> Result<Option<String>, String> {
@@ -62,27 +58,24 @@ pub async fn memory_remember(
     store.remember(&key, layer.as_deref())
 }
 
-#[tauri::command]
 pub async fn memory_count(
-    state: State<'_, AppState>,
+    state: &AppState,
     layer: Option<String>,
 ) -> Result<usize, String> {
     let store = state.memory_store.lock().unwrap();
     store.count(layer.as_deref())
 }
 
-#[tauri::command]
 pub async fn memory_delete(
-    state: State<'_, AppState>,
+    state: &AppState,
     id: String,
 ) -> Result<(), String> {
     let store = state.memory_store.lock().unwrap();
     store.delete(&id)
 }
 
-#[tauri::command]
 pub async fn memory_clear(
-    state: State<'_, AppState>,
+    state: &AppState,
     layer: Option<String>,
 ) -> Result<usize, String> {
     let store = state.memory_store.lock().unwrap();

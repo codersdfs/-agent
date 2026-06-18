@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tauri::State;
 use crate::AppState;
 use crate::pipeline::review::{ReviewAgent, CombinedReviewOutput};
 use crate::pipeline::review_score::{ScoreBreakdown, PromotionStats};
@@ -19,22 +18,19 @@ pub struct ScoreResponse {
     pub pipeline_status: String,
 }
 
-#[tauri::command]
 pub async fn run_review(
-    state: State<'_, AppState>,
+    state: &AppState,
     request: ReviewRequest,
 ) -> Result<CombinedReviewOutput, String> {
     log::info!("run_review: code_len={}, context={:?}", request.code.len(), request.context.chars().take(50).collect::<String>());
 
-    // Update pipeline status
     {
         let mut p = state.pipeline.lock().await;
         p.status = crate::pipeline::PipelineStatus::Reviewing;
     }
 
-    let output = ReviewAgent::combined_review(&state, &request.code, &request.context).await;
+    let output = ReviewAgent::combined_review(state, &request.code, &request.context).await;
 
-    // Auto-promote violations
     if !output.gate_violations.is_empty() {
         let mut db = state.rules_db.lock().unwrap();
         let lang = state.detected_language.lock().unwrap().clone();
@@ -46,11 +42,9 @@ pub async fn run_review(
         }
     }
 
-    // Demote stale rules
-    let demoted = ReviewAgent::demote_stale_rules(&state);
-    let promo_stats = ReviewAgent::get_promotion_stats(&state);
+    let demoted = ReviewAgent::demote_stale_rules(state);
+    let promo_stats = ReviewAgent::get_promotion_stats(state);
 
-    // Update pipeline state
     {
         let mut p = state.pipeline.lock().await;
         p.gate_violations = output.gate_violations.clone();
@@ -62,7 +56,6 @@ pub async fn run_review(
             ..promo_stats
         });
 
-        // Retry decision
         if !output.score_breakdown.passed && p.can_retry() {
             p.increment_retry();
             p.status = crate::pipeline::PipelineStatus::Retrying(p.retry_count, p.max_retries);
@@ -76,9 +69,8 @@ pub async fn run_review(
     Ok(output)
 }
 
-#[tauri::command]
 pub async fn get_score_breakdown(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<ScoreResponse, String> {
     let p = state.pipeline.lock().await;
     Ok(ScoreResponse {
@@ -90,25 +82,22 @@ pub async fn get_score_breakdown(
     })
 }
 
-#[tauri::command]
 pub async fn get_promotion_stats(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<PromotionStats, String> {
-    let stats = ReviewAgent::get_promotion_stats(&state);
+    let stats = ReviewAgent::get_promotion_stats(state);
     Ok(stats)
 }
 
-#[tauri::command]
 pub async fn demote_stale_rules(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<usize, String> {
-    let count = ReviewAgent::demote_stale_rules(&state);
+    let count = ReviewAgent::demote_stale_rules(state);
     Ok(count)
 }
 
-#[tauri::command]
 pub async fn reset_retry_count(
-    state: State<'_, AppState>,
+    state: &AppState,
 ) -> Result<String, String> {
     let mut p = state.pipeline.lock().await;
     p.retry_count = 0;

@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
 use crate::AppState;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -16,17 +15,8 @@ pub struct SendMessageResponse {
     pub agent_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatTokenPayload {
-    pub message_id: String,
-    pub token: String,
-    pub done: bool,
-    pub model: Option<String>,
-}
-
-#[tauri::command]
 pub async fn send_message(
-    state: State<'_, AppState>,
+    state: &AppState,
     request: SendMessageRequest,
 ) -> Result<SendMessageResponse, String> {
     log::info!("send_message: agent={}, content={:?}", request.agent_type, request.content.chars().take(50).collect::<String>());
@@ -68,14 +58,13 @@ pub struct StreamMessageRequest {
     pub system_prompt: Option<String>,
 }
 
-#[tauri::command]
+/// Stream a message to the LLM, printing tokens to stdout as they arrive.
+/// Returns the full accumulated response content.
 pub async fn stream_message(
-    app_handle: AppHandle,
-    state: State<'_, AppState>,
+    state: &AppState,
     request: StreamMessageRequest,
 ) -> Result<String, String> {
-    let message_id = uuid::Uuid::new_v4().to_string();
-    log::info!("stream_message: id={}, agent={}", message_id, request.agent_type);
+    log::info!("stream_message: agent={}", request.agent_type);
 
     let config = request.provider.unwrap_or_else(|| {
         let s = state.provider_config.lock().unwrap();
@@ -103,38 +92,27 @@ pub async fn stream_message(
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let handle = app_handle.clone();
-    let mid1 = message_id.clone();
-    let mid2 = message_id.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = provider.chat_stream(chat_request, tx).await {
-            let _ = handle.emit("chat-error", serde_json::json!({
-                "message_id": mid1,
-                "error": e,
-            }));
-        }
+        let _ = provider.chat_stream(chat_request, tx).await;
     });
 
-    tokio::spawn(async move {
-        while let Some(chunk) = rx.recv().await {
-            let _ = app_handle.emit("chat-token", ChatTokenPayload {
-                message_id: mid2.clone(),
-                token: chunk.content,
-                done: chunk.done,
-                model: chunk.model,
-            });
-            if chunk.done {
-                break;
-            }
+    let mut full = String::new();
+    while let Some(chunk) = rx.recv().await {
+        full.push_str(&chunk.content);
+        print!("{}", chunk.content);
+        use std::io::{Write, stdout};
+        let _ = stdout().flush();
+        if chunk.done {
+            println!();
+            break;
         }
-    });
+    }
 
-    Ok(message_id)
+    Ok(full)
 }
 
-#[tauri::command]
-pub async fn list_models(config: providers::ProviderConfig) -> Result<Vec<String>, String> {
+pub fn list_models(config: &providers::ProviderConfig) -> Result<Vec<String>, String> {
     log::info!("list_models for provider={:?}", config.kind);
     match config.kind {
         providers::ProviderKind::OpenAI => Ok(vec![

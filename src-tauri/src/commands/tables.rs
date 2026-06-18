@@ -8,7 +8,6 @@ pub struct TableQuery {
     pub page_size: Option<usize>,
 }
 
-#[tauri::command]
 pub async fn query_table(request: TableQuery) -> Result<serde_json::Value, String> {
     log::info!("query_table: path={}", request.path);
     Ok(serde_json::json!({"status": "not_implemented"}))
