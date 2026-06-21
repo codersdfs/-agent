@@ -1,0 +1,159 @@
+@import "tailwindcss";
+@import "highlight.js/styles/github-dark.css";
+
+@theme {
+  --color-codex-bg: #0b0f19;
+  --color-codex-surface: #111827;
+  --color-codex-input: #1f2937;
+  --color-codex-border: #374151;
+  --color-codex-border-light: #4b5563;
+  --color-codex-accent: #10b981;
+  --color-codex-accent-dim: #059669;
+  --color-codex-text: #f3f4f6;
+  --color-codex-text-dim: #9ca3af;
+  --color-codex-text-muted: #6b7280;
+  --color-codex-green: #10b981;
+  --color-codex-red: #ef4444;
+  --color-codex-yellow: #f59e0b;
+  --color-codex-blue: #3b82f6;
+  --color-codex-hover: #1f2937;
+  --color-codex-overlay: rgba(11, 15, 25, 0.85);
+  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", "Courier New", monospace;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-mono);
+  background-color: var(--color-codex-bg);
+  color: var(--color-codex-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Terminal-style scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-codex-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-codex-text-muted);
+}
+
+input:focus, textarea:focus {
+  outline: none;
+}
+
+/* ─── Markdown ─────────────────────────────────────────────────────────────── */
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4 {
+  color: var(--color-codex-text);
+  margin: 0.75em 0 0.25em;
+  font-weight: 600;
+}
+.markdown-content h1 { font-size: 1.15em; }
+.markdown-content h2 { font-size: 1.08em; }
+.markdown-content h3 { font-size: 1.03em; }
+.markdown-content p { margin: 0.35em 0; line-height: 1.6; color: var(--color-codex-text); }
+.markdown-content ul,
+.markdown-content ol {
+  margin: 0.35em 0;
+  padding-left: 1.5em;
+}
+.markdown-content li { margin: 0.15em 0; color: var(--color-codex-text); }
+.markdown-content a { color: var(--color-codex-blue); text-decoration: underline; }
+.markdown-content blockquote {
+  border-left: 3px solid var(--color-codex-border);
+  padding-left: 0.75em;
+  margin: 0.5em 0;
+  color: var(--color-codex-text-dim);
+}
+.markdown-content table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  width: 100%;
+}
+.markdown-content th,
+.markdown-content td {
+  border: 1px solid var(--color-codex-border);
+  padding: 0.35em 0.6em;
+  text-align: left;
+}
+.markdown-content th {
+  background: var(--color-codex-surface);
+  color: var(--color-codex-text);
+}
+.markdown-content code:not(pre code) {
+  background: var(--color-codex-input);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+  font-size: 0.9em;
+  color: var(--color-codex-accent);
+}
+.markdown-content pre {
+  margin: 0.5em 0;
+  border-radius: 8px;
+  overflow-x: auto;
+  position: relative;
+  background: var(--color-codex-surface) !important;
+  border: 1px solid var(--color-codex-border);
+}
+.markdown-content pre code {
+  display: block;
+  padding: 0.75em 1em;
+  font-size: 0.82em;
+  line-height: 1.5;
+}
+.markdown-content hr {
+  border: none;
+  border-top: 1px solid var(--color-codex-border);
+  margin: 0.75em 0;
+}
+
+/* Copy button */
+.copy-button {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 8px;
+  font-size: 0.65em;
+  font-family: var(--font-mono);
+  background: var(--color-codex-input);
+  color: var(--color-codex-text-dim);
+  border: 1px solid var(--color-codex-border);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.markdown-content pre:hover .copy-button {
+  opacity: 1;
+}
+.copy-button:hover {
+  background: var(--color-codex-accent);
+  color: var(--color-codex-bg);
+}
+
+/* Highlight.js overrides */
+.hljs {
+  background: transparent !important;
+}

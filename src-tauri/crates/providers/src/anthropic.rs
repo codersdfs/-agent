@@ -76,6 +76,7 @@ impl LlmProvider for AnthropicProvider {
             content: text,
             model: data.model,
             usage: None,
+            tool_calls: None,
         })
     }
 

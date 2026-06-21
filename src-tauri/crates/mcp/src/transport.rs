@@ -1,6 +1,7 @@
 use crate::{McpRequest, McpResponse};
 
 pub struct JsonRpcTransport {
+    #[allow(dead_code)]
     endpoint: String,
 }
 

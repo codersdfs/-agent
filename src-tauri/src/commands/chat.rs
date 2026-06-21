@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::AppState;
+use crate::ChatEmitter;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SendMessageRequest {
@@ -27,30 +28,70 @@ pub async fn send_message(
     });
 
     let provider = providers::create_provider(&config)?;
+    let tools = crate::commands::tools::tool_definitions();
 
-    let messages = vec![
+    let mut messages = vec![
         providers::ChatMessage {
             role: "user".into(),
             content: request.content.clone(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
         },
     ];
 
-    let chat_request = providers::ChatRequest {
-        messages,
-        config,
-        stream: false,
-    };
+    let mut max_loops = 10;
 
-    let response = provider.chat(chat_request).await?;
+    loop {
+        if max_loops == 0 {
+            return Err("Tool call loop exceeded max iterations".into());
+        }
+        max_loops -= 1;
 
-    Ok(SendMessageResponse {
-        message_id: uuid::Uuid::new_v4().to_string(),
-        content: response.content,
-        agent_type: request.agent_type,
-    })
+        let chat_request = providers::ChatRequest {
+            messages: messages.clone(),
+            config: config.clone(),
+            stream: false,
+            tools: Some(tools.clone()),
+        };
+
+        let response = provider.chat(chat_request).await?;
+
+        if let Some(tool_calls) = response.tool_calls {
+            messages.push(providers::ChatMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                tool_calls: Some(tool_calls.clone()),
+                tool_call_id: None,
+                name: None,
+            });
+
+            for tc in &tool_calls {
+                let tool_request = crate::commands::tools::ToolRequest {
+                    tool: tc.function.name.clone(),
+                    args: serde_json::from_str(&tc.function.arguments)
+                        .unwrap_or(serde_json::Value::Null),
+                };
+                let result = crate::commands::tools::execute_tool_inner(state, tool_request).await?;
+                messages.push(providers::ChatMessage {
+                    role: "tool".into(),
+                    content: result.output,
+                    tool_calls: None,
+                    tool_call_id: Some(tc.id.clone()),
+                    name: Some(tc.function.name.clone()),
+                });
+            }
+        } else {
+            return Ok(SendMessageResponse {
+                message_id: uuid::Uuid::new_v4().to_string(),
+                content: response.content,
+                agent_type: request.agent_type,
+            });
+        }
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamMessageRequest {
     pub content: String,
     pub agent_type: String,
@@ -58,11 +99,13 @@ pub struct StreamMessageRequest {
     pub system_prompt: Option<String>,
 }
 
-/// Stream a message to the LLM, printing tokens to stdout as they arrive.
-/// Returns the full accumulated response content.
-pub async fn stream_message(
+/// Stream a message to the LLM, forwarding tokens to the given emitter.
+/// Automatically handles tool calling loops — executes tools silently
+/// and streams only the final text response from each round.
+pub async fn stream_message<E: ChatEmitter>(
     state: &AppState,
     request: StreamMessageRequest,
+    emitter: &E,
 ) -> Result<String, String> {
     log::info!("stream_message: agent={}", request.agent_type);
 
@@ -72,44 +115,79 @@ pub async fn stream_message(
     });
 
     let provider = providers::create_provider(&config)?;
+    let tools = crate::commands::tools::tool_definitions();
 
     let mut messages = vec![];
     if let Some(system) = request.system_prompt {
         messages.push(providers::ChatMessage {
             role: "system".into(),
             content: system,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
         });
     }
     messages.push(providers::ChatMessage {
         role: "user".into(),
         content: request.content,
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
     });
 
-    let chat_request = providers::ChatRequest {
-        messages,
-        config,
-        stream: true,
-    };
+    let mut full_response = String::new();
+    let mut max_loops: u32 = 10;
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    loop {
+        if max_loops == 0 {
+            return Err("Tool call loop exceeded max iterations".into());
+        }
+        max_loops -= 1;
 
-    tokio::spawn(async move {
-        let _ = provider.chat_stream(chat_request, tx).await;
-    });
+        let chat_request = providers::ChatRequest {
+            messages,
+            config: config.clone(),
+            stream: false,
+            tools: Some(tools.clone()),
+        };
 
-    let mut full = String::new();
-    while let Some(chunk) = rx.recv().await {
-        full.push_str(&chunk.content);
-        print!("{}", chunk.content);
-        use std::io::{Write, stdout};
-        let _ = stdout().flush();
-        if chunk.done {
-            println!();
-            break;
+        let response = provider.chat(chat_request).await?;
+
+        if let Some(tool_calls) = response.tool_calls {
+            messages = vec![
+                providers::ChatMessage {
+                    role: "assistant".into(),
+                    content: String::new(),
+                    tool_calls: Some(tool_calls.clone()),
+                    tool_call_id: None,
+                    name: None,
+                },
+            ];
+
+            for tc in &tool_calls {
+                let tool_request = crate::commands::tools::ToolRequest {
+                    tool: tc.function.name.clone(),
+                    args: serde_json::from_str(&tc.function.arguments)
+                        .unwrap_or(serde_json::Value::Null),
+                };
+                let result = crate::commands::tools::execute_tool_inner(state, tool_request).await?;
+                messages.push(providers::ChatMessage {
+                    role: "tool".into(),
+                    content: result.output,
+                    tool_calls: None,
+                    tool_call_id: Some(tc.id.clone()),
+                    name: Some(tc.function.name.clone()),
+                });
+            }
+        } else {
+            if !response.content.is_empty() {
+                emitter.emit_token(&response.content)?;
+                full_response.push_str(&response.content);
+            }
+            emitter.emit_done(&full_response)?;
+            return Ok(full_response);
         }
     }
-
-    Ok(full)
 }
 
 pub fn list_models(config: &providers::ProviderConfig) -> Result<Vec<String>, String> {
@@ -128,6 +206,7 @@ pub fn list_models(config: &providers::ProviderConfig) -> Result<Vec<String>, St
         providers::ProviderKind::XAI => Ok(vec![
             "grok-3".into(), "grok-3-mini".into(),
         ]),
+        providers::ProviderKind::Local => Ok(vec!["ollama".into()]),
         _ => Ok(vec!["unknown".into()]),
     }
 }

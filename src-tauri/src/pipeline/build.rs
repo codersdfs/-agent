@@ -1,8 +1,9 @@
 use crate::AppState;
 use crate::commands::tools::{ToolRequest, ToolResult, GateViolationInfo};
 use crate::pipeline::plan::StructuredPlan;
+use crate::PermissionEvent;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildSessionEntry {
@@ -54,7 +55,6 @@ impl BuildAgent {
         let mut session: Vec<BuildSessionEntry> = vec![];
 
         log::info!("BuildAgent: executing plan with {} steps", plan.steps.len());
-        println!("[build] executing plan with {} steps", plan.steps.len());
 
         {
             let mut p = state.pipeline.lock().await;
@@ -64,7 +64,6 @@ impl BuildAgent {
 
         for (step_idx, step) in plan.steps.iter().enumerate() {
             log::info!("BuildAgent: step {}/{}: {}", step_idx + 1, plan.steps.len(), step.description);
-            println!("[build] step {}/{}: {}", step_idx + 1, plan.steps.len(), step.description);
 
             {
                 let mut p = state.pipeline.lock().await;
@@ -89,8 +88,7 @@ impl BuildAgent {
                     step_description: step.description.clone(),
                 };
 
-                println!("[build] permission: {} (y/n)", perm_req.reason);
-                let approved = Self::wait_for_permission(state).await;
+                let approved = Self::wait_for_permission(state, &perm_req).await;
                 if !approved {
                     session.push(BuildSessionEntry {
                         step_index: step_idx,
@@ -106,7 +104,7 @@ impl BuildAgent {
                         timestamp_start: chrono::Utc::now().to_rfc3339(),
                         timestamp_end: chrono::Utc::now().to_rfc3339(),
                     });
-                    println!("[build] step {}: denied", step_idx);
+                    log::info!("BuildAgent: step {} denied", step_idx);
                     continue;
                 }
             }
@@ -135,7 +133,7 @@ impl BuildAgent {
             };
 
             let status = if result.success { "completed" } else { "failed" };
-            println!("[build] step {}: {} (gate {:?} score {:?} {}ms)", step_idx, status, entry.gate_passed, entry.gate_score, duration_ms);
+            log::info!("BuildAgent: step {}: {} (gate {:?} score {:?} {}ms)", step_idx, status, entry.gate_passed, entry.gate_score, duration_ms);
             session.push(entry);
         }
 
@@ -151,7 +149,7 @@ impl BuildAgent {
 
         let completed = session.iter().filter(|e| e.success).count();
         let total_ms: u64 = session.iter().map(|e| e.duration_ms).sum();
-        println!("[build] complete: {}/{} steps, {}ms total", completed, plan.steps.len(), total_ms);
+        log::info!("BuildAgent: complete: {}/{} steps, {}ms total", completed, plan.steps.len(), total_ms);
 
         Ok(session)
     }
@@ -175,7 +173,7 @@ impl BuildAgent {
             }
 
             let req = ToolRequest { tool: tool_req.tool.clone(), args: args.clone() };
-            println!("[build] tool={} attempt={}/{}", req.tool, attempt + 1, max_retries + 1);
+            log::info!("BuildAgent: tool={} attempt={}/{}", req.tool, attempt + 1, max_retries + 1);
 
             let result = match crate::commands::tools::execute_tool_inner(state, req).await {
                 Ok(r) => r,
@@ -199,12 +197,12 @@ impl BuildAgent {
                             db.promote_or_increment(&lang, &v.category.to_lowercase(), pattern, &v.message, "error");
                         }
                     }
-                    println!("[build] tool={} passed gate (score={}) on attempt {}", tool_req.tool, g.score, attempt + 1);
+                    log::info!("BuildAgent: tool={} passed gate (score={}) on attempt {}", tool_req.tool, g.score, attempt + 1);
                     return result;
                 }
                 ToolResult { success: true, gate_result: Some(ref g), .. } => {
                     last_violations = g.violations.clone();
-                    println!("[build] tool={} failed gate (score={}) on attempt {}", tool_req.tool, g.score, attempt + 1);
+                    log::info!("BuildAgent: tool={} failed gate (score={}) on attempt {}", tool_req.tool, g.score, attempt + 1);
                 }
                 ToolResult { success: false, ref error, .. } => {
                     if let Some(ref e) = error {
@@ -214,7 +212,7 @@ impl BuildAgent {
                             }
                             continue;
                         }
-                        println!("[build] tool={} failed after {} attempts: {}", tool_req.tool, attempt + 1, e);
+                        log::info!("BuildAgent: tool={} failed after {} attempts: {}", tool_req.tool, attempt + 1, e);
                         return result;
                     }
                 }
@@ -253,20 +251,34 @@ impl BuildAgent {
         }
     }
 
-    async fn wait_for_permission(state: &AppState) -> bool {
+    /// Wait for user permission via non-blocking broadcast + polling.
+    /// The permission request is broadcast on state.permission_tx (picked up by
+    /// the Tauri command wrapper and forwarded to the frontend). The frontend
+    /// calls respond_permission, which writes to state.permission_results.
+    async fn wait_for_permission(state: &AppState, perm_req: &PermissionRequest) -> bool {
         if state.build_config.lock().unwrap().auto_approve {
             return true;
         }
-        use std::io::{stdin, stdout, Write};
-        print!("> Allow? (y/n): ");
-        let _ = stdout().flush();
-        let mut line = String::new();
-        match stdin().read_line(&mut line) {
-            Ok(_) => {
-                let trimmed = line.trim().to_lowercase();
-                trimmed == "y" || trimmed == "yes"
+
+        // Broadcast the permission request to any subscriber (e.g. Tauri event forwarder)
+        let event = PermissionEvent {
+            request_id: perm_req.id.clone(),
+            tool: perm_req.tool.clone(),
+            args: perm_req.args.clone(),
+            reason: perm_req.reason.clone(),
+            step_id: perm_req.step_id,
+            step_description: perm_req.step_description.clone(),
+        };
+        let _ = state.permission_tx.send(event);
+
+        // Poll for a response written by respond_permission
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut results = state.permission_results.lock().unwrap();
+            if let Some(result) = results.remove(&perm_req.id) {
+                state.pending_permissions.lock().unwrap().remove(&perm_req.id);
+                return result;
             }
-            Err(_) => false,
         }
     }
 }

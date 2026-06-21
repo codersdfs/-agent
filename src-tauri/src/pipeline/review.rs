@@ -57,13 +57,14 @@ impl ReviewAgent {
 
         let provider = providers::create_provider(&config)?;
         let messages = vec![
-            providers::ChatMessage { role: "user".into(), content: review_prompt },
+            providers::ChatMessage { role: "user".into(), content: review_prompt, tool_calls: None, tool_call_id: None, name: None },
         ];
 
         let chat_request = providers::ChatRequest {
             messages,
             config,
             stream: false,
+            tools: None,
         };
 
         let response = provider.chat(chat_request).await?;

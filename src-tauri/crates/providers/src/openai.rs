@@ -1,10 +1,31 @@
-use crate::{ChatRequest, ChatResponse, LlmProvider, StreamChunk, Usage};
+use crate::{ChatRequest, ChatResponse, LlmProvider, StreamChunk, ToolCall, Usage};
 use serde::Serialize;
 
 #[derive(Serialize, serde::Deserialize)]
 struct OpenAIMessage {
     role: String,
+    #[serde(default)]
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAIToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+#[derive(Serialize, serde::Deserialize)]
+struct OpenAIToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    tool_type: String,
+    function: OpenAIToolCallFunction,
+}
+
+#[derive(Serialize, serde::Deserialize)]
+struct OpenAIToolCallFunction {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Serialize)]
@@ -14,11 +35,28 @@ struct OpenAIRequest {
     stream: bool,
     max_tokens: u32,
     temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OpenAIToolDef>>,
+}
+
+#[derive(Serialize)]
+struct OpenAIToolDef {
+    #[serde(rename = "type")]
+    tool_type: String,
+    function: OpenAIToolFunctionDef,
+}
+
+#[derive(Serialize)]
+struct OpenAIToolFunctionDef {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
 }
 
 #[derive(serde::Deserialize)]
 struct OpenAIResponseChoice {
     message: OpenAIMessage,
+    #[allow(dead_code)]
     finish_reason: Option<String>,
 }
 
@@ -38,6 +76,23 @@ struct OpenAIUsage {
 #[derive(serde::Deserialize)]
 struct StreamDelta {
     content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<StreamDeltaToolCall>>,
+}
+
+#[derive(serde::Deserialize)]
+struct StreamDeltaToolCall {
+    index: usize,
+    id: Option<String>,
+    #[serde(rename = "type")]
+    tool_type: Option<String>,
+    function: Option<StreamDeltaToolCallFunction>,
+}
+
+#[derive(serde::Deserialize)]
+struct StreamDeltaToolCallFunction {
+    name: Option<String>,
+    arguments: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -57,21 +112,60 @@ pub struct OpenAIProvider {
     base_url: String,
 }
 
+#[derive(serde::Deserialize)]
+struct OpenAIErrorResponse {
+    error: OpenAIErrorDetail,
+}
+
+#[derive(serde::Deserialize)]
+struct OpenAIErrorDetail {
+    message: String,
+    #[allow(dead_code)]
+    r#type: Option<String>,
+}
+
 impl OpenAIProvider {
     pub fn new(api_key: String, base_url: String) -> Self {
         Self { api_key, base_url }
     }
 
     fn build_request(&self, request: &ChatRequest) -> OpenAIRequest {
+        let tools = request.tools.as_ref().map(|tools| {
+            tools.iter().map(|t| OpenAIToolDef {
+                tool_type: t.tool_type.clone(),
+                function: OpenAIToolFunctionDef {
+                    name: t.function.name.clone(),
+                    description: t.function.description.clone(),
+                    parameters: t.function.parameters.clone(),
+                },
+            }).collect()
+        });
+
         OpenAIRequest {
             model: request.config.model.clone(),
-            messages: request.messages.iter().map(|m| OpenAIMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
+            messages: request.messages.iter().map(|m| {
+                let tool_calls = m.tool_calls.as_ref().map(|calls| {
+                    calls.iter().map(|tc| OpenAIToolCall {
+                        id: tc.id.clone(),
+                        tool_type: tc.tool_type.clone(),
+                        function: OpenAIToolCallFunction {
+                            name: tc.function.name.clone(),
+                            arguments: tc.function.arguments.clone(),
+                        },
+                    }).collect()
+                });
+                OpenAIMessage {
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                    tool_calls,
+                    tool_call_id: m.tool_call_id.clone(),
+                    name: m.name.clone(),
+                }
             }).collect(),
             stream: request.stream,
             max_tokens: request.config.max_tokens,
             temperature: request.config.temperature,
+            tools,
         }
     }
 
@@ -99,11 +193,32 @@ impl LlmProvider for OpenAIProvider {
             return Err(format!("API error {}: {}", status, text));
         }
 
-        let data: OpenAIResponse = resp.json().await
-            .map_err(|e| format!("parse failed: {}", e))?;
+        let body_text = resp.text().await.map_err(|e| format!("failed to read response body: {}", e))?;
+
+        // Some providers (OpenRouter, etc.) return 200 with an error body
+        if let Ok(err_resp) = serde_json::from_str::<OpenAIErrorResponse>(&body_text) {
+            return Err(format!("API error: {}", err_resp.error.message));
+        }
+
+        let data: OpenAIResponse = serde_json::from_str(&body_text)
+            .map_err(|e| {
+                let preview: String = body_text.chars().take(1000).collect();
+                format!("parse failed: {} (body: {}...)", e, preview)
+            })?;
 
         let choice = data.choices.into_iter().next()
             .ok_or_else(|| "no choices returned".to_string())?;
+
+        let tool_calls = choice.message.tool_calls.map(|calls| {
+            calls.into_iter().map(|tc| ToolCall {
+                id: tc.id,
+                tool_type: tc.tool_type,
+                function: crate::ToolCallFunction {
+                    name: tc.function.name,
+                    arguments: tc.function.arguments,
+                },
+            }).collect()
+        });
 
         Ok(ChatResponse {
             content: choice.message.content,
@@ -112,6 +227,7 @@ impl LlmProvider for OpenAIProvider {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
             }),
+            tool_calls,
         })
     }
 
@@ -157,6 +273,7 @@ impl LlmProvider for OpenAIProvider {
                         done: true,
                         model: None,
                         usage: None,
+                        delta_tool_calls: None,
                     });
                     return Ok(());
                 }
@@ -166,11 +283,25 @@ impl LlmProvider for OpenAIProvider {
                         if let Some(choice) = event.choices.into_iter().next() {
                             let content = choice.delta.content.unwrap_or_default();
                             let is_done = choice.finish_reason.is_some();
+
+                            let delta_tool_calls = choice.delta.tool_calls.map(|calls| {
+                                calls.into_iter().map(|tc| crate::DeltaToolCall {
+                                    index: tc.index,
+                                    id: tc.id,
+                                    tool_type: tc.tool_type,
+                                    function: tc.function.map(|f| crate::DeltaToolCallFunction {
+                                        name: f.name,
+                                        arguments: f.arguments,
+                                    }),
+                                }).collect()
+                            });
+
                             let _ = tx.send(StreamChunk {
                                 content,
                                 done: is_done,
                                 model: event.model.clone(),
                                 usage: None,
+                                delta_tool_calls,
                             });
                             if is_done {
                                 return Ok(());

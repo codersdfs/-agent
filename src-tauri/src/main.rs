@@ -1,11 +1,19 @@
+mod config;
+
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use omega_agent_lib::{AppState, default_db_path, commands, pipeline};
+use omega_agent_lib::{commands, pipeline, AppState, TerminalPrinter, default_db_path};
+use std::io::{stdin, stdout, Write};
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let cli = Cli::parse();
+
+    if !cli.cli {
+        omega_agent_lib::run();
+        return Ok(());
+    }
 
     let rt = tokio::runtime::Runtime::new()?;
 
@@ -18,6 +26,9 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Plan { task }) => {
             rt.block_on(cmd_plan(task))?;
+        }
+        Some(Command::Code { task, execute }) => {
+            rt.block_on(cmd_code(task, execute))?;
         }
         Some(Command::PlanStatus) => {
             rt.block_on(cmd_plan_status())?;
@@ -41,7 +52,13 @@ fn main() -> anyhow::Result<()> {
             rt.block_on(cmd_config(command))?;
         }
         Some(Command::ListModels { provider }) => {
-            rt.block_on(cmd_list_models(provider))?;
+            rt.block_on(cmd_models(provider, None, None))?;
+        }
+        Some(Command::Provider) => {
+            rt.block_on(cmd_provider())?;
+        }
+        Some(Command::Models { provider, base_url, api_key }) => {
+            rt.block_on(cmd_models(provider, base_url, api_key))?;
         }
     }
 
@@ -53,6 +70,10 @@ fn main() -> anyhow::Result<()> {
 #[derive(Parser)]
 #[command(name = "omega", version, about = "Omega Agent CLI — AI coding assistant")]
 struct Cli {
+    /// Run in CLI mode (default: true)
+    #[arg(long, global = true, default_value_t = true)]
+    cli: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -68,6 +89,15 @@ enum Command {
     Plan {
         /// Task description
         task: String,
+    },
+    /// Generate a code plan and optionally execute it
+    #[command(alias = "c")]
+    Code {
+        /// Task description
+        task: String,
+        /// Execute the generated plan after approval
+        #[arg(short, long)]
+        execute: bool,
     },
     /// View the current plan
     PlanStatus,
@@ -97,10 +127,23 @@ enum Command {
     /// Configuration
     #[command(subcommand)]
     Config(ConfigSubcommand),
-    /// List available models for a provider
+    /// List available models for a provider (static, use `omega models` to fetch live)
     ListModels {
         /// Provider name (optional, defaults to current)
         provider: Option<String>,
+    },
+    /// Interactive provider setup — select provider, enter API key, fetch models, select model
+    Provider,
+    /// Fetch and list models from the configured provider
+    Models {
+        /// Provider name (optional, defaults to current)
+        provider: Option<String>,
+        /// Custom base URL (hidden from output)
+        #[arg(long)]
+        base_url: Option<String>,
+        /// API key (hidden from output)
+        #[arg(long)]
+        api_key: Option<String>,
     },
 }
 
@@ -134,7 +177,319 @@ enum ConfigSubcommand {
 
 fn create_state() -> AppState {
     let db_path = default_db_path();
-    AppState::new(&db_path)
+    let provider_config = config::load_provider_config();
+    AppState::new_with_provider_config(&db_path, provider_config)
+}
+
+fn create_state_with_provider(provider_config: providers::ProviderConfig) -> AppState {
+    let db_path = default_db_path();
+    AppState::new_with_provider_config(&db_path, provider_config)
+}
+
+// ─── Banner & Formatting ───────────────────────────────────────────────────────
+
+const BANNER: &str = r#"        %@#%%%%%%#%@
+     %#@@@@@@@@@@@@%#
+   #@%#%%%%%%%%%%%%#%@
+   %@%#  OMEGA AGENT #@%
+   #@%#%%%%%%%%%%%%#%@
+     %#@@@@@@@@@@@@%#
+        %@#%%%%%%#%@"#;
+
+fn print_banner(cfg: &providers::ProviderConfig) {
+    println!("{}", BANNER.bright_purple().bold());
+    println!();
+    println!("   provider: {}", cfg.kind.to_string().bright_cyan());
+    println!("   model:    {}", cfg.model.bright_cyan());
+    println!();
+}
+
+fn print_section(title: &str) {
+    println!("   {} {}", "──", title.bold().underline());
+    println!();
+}
+
+fn print_success(message: &str) {
+    println!("   {}", message.green());
+}
+
+fn print_error(message: &str) {
+    eprintln!("   {} {}", "ERROR".red().bold(), message);
+}
+
+fn print_error_detail(message: &str, detail: &str) {
+    eprintln!("   {} {}", "ERROR".red().bold(), message);
+    if !detail.is_empty() {
+        eprintln!("   {}", detail.dimmed());
+    }
+}
+
+// ─── Interactive helpers ───────────────────────────────────────────────────────
+
+fn select_provider() -> anyhow::Result<providers::ProviderKind> {
+    let providers = providers::ProviderKind::all();
+    println!("   SELECT PROVIDER");
+    println!();
+    println!("   #    PROVIDER");
+    for (i, p) in providers.iter().enumerate() {
+        println!("   {:<4} {}", i + 1, p);
+    }
+    println!();
+    print!("   Enter number or name: ");
+    stdout().flush()?;
+
+    let mut input = String::new();
+    stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+
+    if trimmed.is_empty() {
+        anyhow::bail!("No provider selected");
+    }
+
+    if let Ok(idx) = trimmed.parse::<usize>() {
+        if idx >= 1 && idx <= providers.len() {
+            return Ok(providers[idx - 1].clone());
+        }
+    }
+
+    let kind = providers::ProviderKind::from_str(trimmed);
+    Ok(kind)
+}
+
+fn prompt_api_key() -> anyhow::Result<String> {
+    print!("   Enter API key: ");
+    stdout().flush()?;
+    let key = rpassword::read_password()
+        .map_err(|e| anyhow::anyhow!("Failed to read API key: {}", e))?;
+    Ok(key.trim().to_string())
+}
+
+fn prompt_base_url(kind: &providers::ProviderKind) -> anyhow::Result<Option<String>> {
+    let _ = kind.default_base_url();
+    print!("   Custom base URL? [Enter for default]: ");
+    stdout().flush()?;
+    let url = rpassword::read_password()
+        .map_err(|e| anyhow::anyhow!("Failed to read base URL: {}", e))?;
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
+}
+
+fn print_models(models: &[providers::ModelInfo]) {
+    print_section("AVAILABLE MODELS");
+    println!("   #    MODEL");
+    for (i, m) in models.iter().enumerate() {
+        println!("   {:<4} {}", i + 1, m.display_name());
+    }
+    println!();
+}
+
+fn select_model(models: &[providers::ModelInfo]) -> anyhow::Result<String> {
+    print_models(models);
+    print!("   Select model [number or ID]: ");
+    stdout().flush()?;
+
+    let mut input = String::new();
+    stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+
+    if trimmed.is_empty() {
+        anyhow::bail!("No model selected");
+    }
+
+    if let Ok(idx) = trimmed.parse::<usize>() {
+        if idx >= 1 && idx <= models.len() {
+            return Ok(models[idx - 1].id.clone());
+        }
+    }
+
+    if models.iter().any(|m| m.id == trimmed || m.name.as_deref() == Some(trimmed)) {
+        return Ok(trimmed.to_string());
+    }
+
+    anyhow::bail!("Invalid model selection")
+}
+
+async fn ensure_model_ready(cfg: &mut providers::ProviderConfig) -> anyhow::Result<()> {
+    let base_url = cfg.base_url.clone().unwrap_or_else(|| cfg.kind.default_base_url());
+
+    if cfg.model.is_empty() || cfg.model == "gpt-4" {
+        println!("   Fetching models...");
+        let temp_cfg = providers::ProviderConfig {
+            base_url: Some(base_url.clone()),
+            api_key: cfg.api_key.clone(),
+            kind: cfg.kind.clone(),
+            ..providers::ProviderConfig::default()
+        };
+
+        match providers::fetch_models(&temp_cfg).await {
+            Ok(models) => {
+                let selected = select_model(&models)?;
+                cfg.model = selected.clone();
+                let mut cli_config = config::load_config();
+                cli_config.model = Some(selected);
+                let _ = config::save_config(&cli_config);
+            }
+            Err(e) => {
+                print_error_detail("Could not fetch models.", &e);
+                return Err(anyhow::anyhow!("Model fetch failed"));
+            }
+        }
+    }
+    Ok(())
+}
+
+// ─── Command handlers ──────────────────────────────────────────────────────────
+
+async fn cmd_provider() -> anyhow::Result<()> {
+    let provider_cfg = config::load_provider_config();
+    print_banner(&provider_cfg);
+    print_section("SELECT PROVIDER");
+
+    let kind = match select_provider() {
+        Ok(k) => k,
+        Err(e) => {
+            print_error(&e.to_string());
+            return Ok(());
+        }
+    };
+
+    println!();
+    print_success(&format!("Selected provider: {}", kind));
+
+    let api_key = prompt_api_key()?;
+    let base_url = prompt_base_url(&kind)?;
+
+    println!();
+    println!("   Fetching models...");
+
+    let mut temp_cfg = providers::ProviderConfig {
+        base_url: base_url.clone().or_else(|| Some(kind.default_base_url())),
+        api_key: Some(api_key.clone()),
+        kind: kind.clone(),
+        model: String::new(),
+        ..providers::ProviderConfig::default()
+    };
+
+    match providers::fetch_models(&temp_cfg).await {
+        Ok(models) => {
+            let selected_id = select_model(&models)?;
+            temp_cfg.model = selected_id.clone();
+
+            let cli_cfg = config::CliConfig {
+                provider: Some(kind.to_string()),
+                model: Some(selected_id),
+                base_url: base_url,
+            };
+            config::save_config(&cli_cfg).map_err(|e| anyhow::anyhow!(e))?;
+            config::save_api_key(&api_key).map_err(|e| anyhow::anyhow!(e))?;
+
+            println!();
+            print_success("Configuration saved.");
+        }
+        Err(e) => {
+            print_error_detail("Could not fetch models from provider.", &e);
+            return Err(anyhow::anyhow!("Provider setup failed"));
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_models(
+    provider: Option<String>,
+    base_url_override: Option<String>,
+    api_key_override: Option<String>,
+) -> anyhow::Result<()> {
+    let mut cfg = config::load_provider_config();
+
+    if let Some(ref name) = provider {
+        cfg.kind = providers::ProviderKind::from_str(name);
+    }
+    if let Some(ref url) = base_url_override {
+        cfg.base_url = Some(url.clone());
+    }
+    if let Some(ref key) = api_key_override {
+        cfg.api_key = Some(key.clone());
+    }
+
+    print_banner(&cfg);
+
+    println!("   Fetching models...");
+
+    match providers::fetch_models(&cfg).await {
+        Ok(models) => {
+            print_section("AVAILABLE MODELS");
+            println!("   #    MODEL");
+            for (i, m) in models.iter().enumerate() {
+                println!("   {:<4} {}", i + 1, m.display_name());
+            }
+        }
+        Err(_e) => {
+            print_warning("Could not fetch models from provider. Showing built-in list.");
+
+            let static_list = match cfg.kind {
+                providers::ProviderKind::Anthropic => {
+                    vec![
+                        providers::ModelInfo { id: "claude-3-5-sonnet-20241022".into(), name: Some("Claude 3.5 Sonnet".into()), provider: "anthropic".into() },
+                        providers::ModelInfo { id: "claude-3-5-haiku-20241022".into(), name: Some("Claude 3.5 Haiku".into()), provider: "anthropic".into() },
+                        providers::ModelInfo { id: "claude-opus-4-20250514".into(), name: Some("Claude Opus 4".into()), provider: "anthropic".into() },
+                    ]
+                }
+                providers::ProviderKind::Google => {
+                    vec![
+                        providers::ModelInfo { id: "models/gemini-1.5-flash".into(), name: Some("Gemini 1.5 Flash".into()), provider: "google".into() },
+                        providers::ModelInfo { id: "models/gemini-1.5-pro".into(), name: Some("Gemini 1.5 Pro".into()), provider: "google".into() },
+                        providers::ModelInfo { id: "models/gemini-2.0-flash-exp".into(), name: Some("Gemini 2.0 Flash".into()), provider: "google".into() },
+                    ]
+                }
+                _ => {
+                    vec![
+                        providers::ModelInfo { id: "gpt-4o".into(), name: None, provider: cfg.kind.to_string() },
+                        providers::ModelInfo { id: "gpt-4o-mini".into(), name: None, provider: cfg.kind.to_string() },
+                        providers::ModelInfo { id: "gpt-4-turbo".into(), name: None, provider: cfg.kind.to_string() },
+                    ]
+                }
+            };
+
+            print_models(&static_list);
+        }
+    }
+
+    Ok(())
+}
+
+fn print_warning(message: &str) {
+    println!("   {} {}", "WARNING".yellow().bold(), message);
+}
+
+async fn cmd_chat(message: String) -> anyhow::Result<()> {
+    let mut provider_cfg = config::load_provider_config();
+    ensure_model_ready(&mut provider_cfg).await?;
+
+    print_banner(&provider_cfg);
+    print_section("CHAT");
+    println!("   > {}", message);
+    println!();
+
+    let state = create_state_with_provider(provider_cfg.clone());
+    let request = commands::chat::StreamMessageRequest {
+        content: message,
+        agent_type: "chat".into(),
+        provider: Some(provider_cfg),
+        system_prompt: None,
+    };
+    let emitter = TerminalPrinter;
+    match commands::chat::stream_message(&state, request, &emitter).await {
+        Ok(_) => {}
+        Err(e) => {
+            print_error_detail("LLM request failed.", &e);
+        }
+    }
+    Ok(())
 }
 
 fn print_plan(plan: &pipeline::plan::StructuredPlan) {
@@ -155,30 +510,26 @@ fn print_plan(plan: &pipeline::plan::StructuredPlan) {
     println!("{}", "─".repeat(60));
 }
 
-// ─── Command handlers ──────────────────────────────────────────────────────────
-
-async fn cmd_chat(message: String) -> anyhow::Result<()> {
+async fn cmd_plan(task: String) -> anyhow::Result<()> {
     let state = create_state();
-    let request = commands::chat::StreamMessageRequest {
-        content: message,
-        agent_type: "plan".into(),
-        provider: None,
-        system_prompt: None,
-    };
-    match commands::chat::stream_message(&state, request).await {
-        Ok(content) => {
-            println!("\n{}", content);
+    match commands::plan_cmd::generate_plan(&state, task).await {
+        Ok(payload) => {
+            print_plan(&payload.plan);
         }
         Err(e) => eprintln!("{} {}", "Error:".red().bold(), e),
     }
     Ok(())
 }
 
-async fn cmd_plan(task: String) -> anyhow::Result<()> {
+async fn cmd_code(task: String, execute: bool) -> anyhow::Result<()> {
     let state = create_state();
     match commands::plan_cmd::generate_plan(&state, task).await {
         Ok(payload) => {
             print_plan(&payload.plan);
+            if execute {
+                println!("\n{} {}", "Action:".bold(), "approve and execute plan".bright_blue());
+                cmd_build(true).await?;
+            }
         }
         Err(e) => eprintln!("{} {}", "Error:".red().bold(), e),
     }
@@ -333,58 +684,50 @@ async fn cmd_memory(cmd: MemorySubcommand) -> anyhow::Result<()> {
 }
 
 async fn cmd_config(cmd: ConfigSubcommand) -> anyhow::Result<()> {
-    let state = create_state();
     match cmd {
         ConfigSubcommand::Show => {
-            let config = state.provider_config.lock().unwrap();
-            println!("{}", "Current Configuration:".bold());
-            println!("  provider:  {}", config.kind);
-            println!("  model:     {}", config.model);
-            println!("  base_url:  {}", config.base_url.as_deref().unwrap_or("(default)"));
-            println!("  max_tokens: {}", config.max_tokens);
-            println!("  temperature: {}", config.temperature);
-            println!("  api_key:   {}", if config.api_key.as_deref().unwrap_or("").is_empty() { "(not set)" } else { "****" });
+            let cfg = config::load_provider_config();
+            print_banner(&cfg);
         }
         ConfigSubcommand::Set { key, value } => {
-            let mut config = state.provider_config.lock().unwrap();
+            let mut cli_cfg = config::load_config();
+            let mut provider_cfg = cli_cfg.to_provider_config();
+
             match key.as_str() {
-                "provider" => config.kind = providers::ProviderKind::from_str(&value),
-                "model" => config.model = value,
-                "base_url" => config.base_url = Some(value),
-                "api_key" => config.api_key = Some(value),
-                "max_tokens" => config.max_tokens = value.parse().unwrap_or(4096),
-                "temperature" => config.temperature = value.parse().unwrap_or(0.7),
-                _ => eprintln!("{} Unknown key: {}. Try: provider, model, base_url, api_key, max_tokens, temperature", "Error:".red().bold(), key),
+                "provider" => {
+                    provider_cfg.kind = providers::ProviderKind::from_str(&value);
+                    println!("   provider updated");
+                }
+                "model" => {
+                    provider_cfg.model = value;
+                    println!("   model updated");
+                }
+                "base_url" => {
+                    provider_cfg.base_url = Some(value);
+                    println!("   base_url updated");
+                }
+                "api_key" => {
+                    config::save_api_key(&value).map_err(|e| anyhow::anyhow!(e))?;
+                    println!("   api_key updated (stored in .env)");
+                    return Ok(());
+                }
+                _ => {
+                    print_error("Unknown key. Try: provider, model, base_url, api_key, max_tokens, temperature");
+                    return Ok(());
+                }
             }
-            println!("{} set to {}", key, "updated".green());
+
+            cli_cfg = config::CliConfig::from_provider_config(&provider_cfg);
+            config::save_config(&cli_cfg).map_err(|e| anyhow::anyhow!(e))?;
         }
         ConfigSubcommand::Providers => {
-            println!("{}", "Available providers:".bold());
-            for kind in providers::ProviderKind::all() {
-                println!("  {}", kind);
+            let cfg = config::load_provider_config();
+            print_banner(&cfg);
+            print_section("AVAILABLE PROVIDERS");
+            for (i, kind) in providers::ProviderKind::all().iter().enumerate() {
+                println!("   {:<4} {}", i + 1, kind);
             }
         }
-    }
-    Ok(())
-}
-
-async fn cmd_list_models(provider: Option<String>) -> anyhow::Result<()> {
-    let state = create_state();
-    let config = if let Some(ref name) = provider {
-        let kind = providers::ProviderKind::from_str(name);
-        let mut c = state.provider_config.lock().unwrap().clone();
-        c.kind = kind;
-        c
-    } else {
-        state.provider_config.lock().unwrap().clone()
-    };
-    match commands::chat::list_models(&config) {
-        Ok(models) => {
-            for m in models {
-                println!("  {}", m);
-            }
-        }
-        Err(e) => eprintln!("{} {}", "Error:".red().bold(), e),
     }
     Ok(())
 }
@@ -393,12 +736,13 @@ async fn cmd_list_models(provider: Option<String>) -> anyhow::Result<()> {
 
 async fn repl() -> anyhow::Result<()> {
     let state = create_state();
-    use std::io::{stdin, stdout, Write};
-
-    println!("{}", "Ω Omega Agent — interactive mode. Type /help for commands.".bright_purple().bold());
+    let cfg = config::load_provider_config();
+    print_banner(&cfg);
+    println!("   Interactive mode. Type /help.");
+    println!();
 
     loop {
-        print!("{} ", "Ω>".bright_purple().bold());
+        print!("{} ", "#>".bright_purple().bold());
         let _ = stdout().flush();
         let mut line = String::new();
         if stdin().read_line(&mut line).is_err() || line.trim().is_empty() {
@@ -407,17 +751,24 @@ async fn repl() -> anyhow::Result<()> {
         let line = line.trim().to_string();
 
         if !line.starts_with('/') {
-            // Plain text — send to chat
+            let mut provider_cfg = config::load_provider_config();
+            if let Err(e) = ensure_model_ready(&mut provider_cfg).await {
+                print_error_detail("Model not ready.", &e.to_string());
+                continue;
+            }
+            let state = create_state_with_provider(provider_cfg.clone());
             let request = commands::chat::StreamMessageRequest {
                 content: line,
-                agent_type: "plan".into(),
-                provider: None,
+                agent_type: "chat".into(),
+                provider: Some(provider_cfg.clone()),
                 system_prompt: None,
             };
-            match commands::chat::stream_message(&state, request).await {
+            let emitter = TerminalPrinter;
+            match commands::chat::stream_message(&state, request, &emitter).await {
                 Ok(_) => {}
-                Err(e) => eprintln!("{} {}", "Error:".red().bold(), e),
+                Err(e) => print_error_detail("LLM request failed.", &e),
             }
+            println!();
             continue;
         }
 
@@ -431,15 +782,22 @@ async fn repl() -> anyhow::Result<()> {
                     eprintln!("{} Usage: /chat <message>", "Usage:".yellow().bold());
                     continue;
                 }
+                let mut provider_cfg = config::load_provider_config();
+                if let Err(e) = ensure_model_ready(&mut provider_cfg).await {
+                    print_error_detail("Model not ready.", &e.to_string());
+                    continue;
+                }
+                let state = create_state_with_provider(provider_cfg.clone());
                 let request = commands::chat::StreamMessageRequest {
                     content: rest,
-                    agent_type: "plan".into(),
-                    provider: None,
+                    agent_type: "chat".into(),
+                    provider: Some(provider_cfg.clone()),
                     system_prompt: None,
                 };
-                match commands::chat::stream_message(&state, request).await {
+                let emitter = TerminalPrinter;
+                match commands::chat::stream_message(&state, request, &emitter).await {
                     Ok(_) => {}
-                    Err(e) => eprintln!("{} {}", "Error:".red().bold(), e),
+                    Err(e) => print_error_detail("LLM request failed.", &e),
                 }
             }
             "/plan" | "/p" => {
@@ -621,16 +979,11 @@ async fn repl() -> anyhow::Result<()> {
                 }
             }
             "/config" => {
-                let args: Vec<&str> = rest.splitn(2, ' ').collect();
+                let args: Vec<&str> = rest.splitn(3, ' ').collect();
                 match args.first().copied().unwrap_or("show") {
                     "show" => {
-                        let config = state.provider_config.lock().unwrap();
-                        println!("{} {}", "provider:".bold(), config.kind);
-                        println!("{} {}", "model:".bold(), config.model);
-                        println!("{} {}", "base_url:".bold(), config.base_url.as_deref().unwrap_or("(default)"));
-                        println!("{} {}", "max_tokens:".bold(), config.max_tokens);
-                        println!("{} {}", "temperature:".bold(), config.temperature);
-                        println!("{} {}", "api_key:".bold(), if config.api_key.as_deref().unwrap_or("").is_empty() { "(not set)" } else { "****" });
+                        let cfg = config::load_provider_config();
+                        print_banner(&cfg);
                     }
                     "set" => {
                         if args.len() < 3 {
@@ -639,24 +992,51 @@ async fn repl() -> anyhow::Result<()> {
                         }
                         let key = args[1];
                         let value = args[2];
-                        let mut config = state.provider_config.lock().unwrap();
+                        let mut cli_cfg = config::load_config();
+                        let mut provider_cfg = cli_cfg.to_provider_config();
                         match key {
-                            "provider" => config.kind = providers::ProviderKind::from_str(value),
-                            "model" => config.model = value.to_string(),
-                            "base_url" => config.base_url = Some(value.to_string()),
-                            "api_key" => config.api_key = Some(value.to_string()),
-                            "max_tokens" => config.max_tokens = value.parse().unwrap_or(4096),
-                            "temperature" => config.temperature = value.parse().unwrap_or(0.7),
-                            _ => eprintln!("{} Unknown key: {}", "Error:".red().bold(), key),
+                            "provider" => {
+                                provider_cfg.kind = providers::ProviderKind::from_str(value);
+                                println!("   provider updated");
+                            }
+                            "model" => {
+                                provider_cfg.model = value.to_string();
+                                println!("   model updated");
+                            }
+                            "base_url" => {
+                                provider_cfg.base_url = Some(value.to_string());
+                                println!("   base_url updated");
+                            }
+                            "api_key" => {
+                                let _ = config::save_api_key(value);
+                                println!("   api_key updated (stored in .env)");
+                            }
+                            _ => {
+                                println!("{} Unknown key: {}", "Error:".red().bold(), key);
+                                continue;
+                            }
                         }
-                        println!("{} set to {}", key, "updated".green());
+                        cli_cfg = config::CliConfig::from_provider_config(&provider_cfg);
+                        let _ = config::save_config(&cli_cfg);
                     }
                     "providers" => {
-                        for kind in providers::ProviderKind::all() {
-                            println!("  {}", kind);
+                        for (i, kind) in providers::ProviderKind::all().iter().enumerate() {
+                            println!("   {:<4} {}", i + 1, kind);
                         }
                     }
                     _ => eprintln!("{} Usage: /config [show|set|providers]", "Usage:".yellow().bold()),
+                }
+            }
+            "/models" => {
+                let provider_name = if rest.is_empty() { None } else { Some(rest.clone()) };
+                let fut = cmd_models(provider_name, None, None);
+                if let Err(e) = fut.await {
+                    print_error_detail("Failed to fetch models.", &e.to_string());
+                }
+            }
+            "/provider" => {
+                if let Err(e) = cmd_provider().await {
+                    print_error_detail("Provider setup failed.", &e.to_string());
                 }
             }
             "/help" | "/h" => {
@@ -668,8 +1048,10 @@ async fn repl() -> anyhow::Result<()> {
                 println!("  /build [auto]   Execute build from approved plan");
                 println!("  /review <file>  Run Gate + LLM review on a file");
                 println!("  /gate <file>    Run Gate checks only");
-                println!("  /memory ...     Memory operations (store, search, remember, count, delete, clear)");
+                println!("  /memory ...     Memory operations");
                 println!("  /config ...     Configuration (show, set, providers)");
+                println!("  /provider       Interactive provider setup");
+                println!("  /models         Fetch and list models");
                 println!("  /help           Show this help");
                 println!("  /exit           Exit the REPL");
                 println!();

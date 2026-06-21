@@ -292,3 +292,92 @@ pub fn list_tools() -> Result<Vec<String>, String> {
         "glob".into(),
     ])
 }
+
+fn param_schema(param_type: &str, description: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": param_type,
+        "description": description,
+    })
+}
+
+fn string_param(description: &str) -> serde_json::Value {
+    param_schema("string", description)
+}
+
+fn tool_def(name: &str, description: &str, properties: Vec<(&str, serde_json::Value)>, required: Vec<&str>) -> providers::ToolDefinition {
+    let mut props = serde_json::Map::new();
+    for (k, v) in properties {
+        props.insert(k.to_string(), v);
+    }
+    providers::ToolDefinition {
+        tool_type: "function".into(),
+        function: providers::ToolFunctionDef {
+            name: name.into(),
+            description: description.into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": props,
+                "required": required,
+            }),
+        },
+    }
+}
+
+pub fn tool_definitions() -> Vec<providers::ToolDefinition> {
+    vec![
+        tool_def(
+            "read",
+            "Read the contents of a file at the given path",
+            vec![("filePath", string_param("Absolute or relative path to the file"))],
+            vec!["filePath"],
+        ),
+        tool_def(
+            "write",
+            "Write content to a file, creating it if it doesn't exist. Overwrites existing content.",
+            vec![
+                ("filePath", string_param("Absolute or relative path to the file")),
+                ("content", string_param("The full content to write")),
+            ],
+            vec!["filePath", "content"],
+        ),
+        tool_def(
+            "edit",
+            "Edit a file by finding and replacing a specific string. For replacing substrings within a file.",
+            vec![
+                ("filePath", string_param("Absolute or relative path to the file")),
+                ("oldString", string_param("The exact text to find and replace")),
+                ("newString", string_param("The replacement text")),
+                ("replaceAll", serde_json::json!({
+                    "type": "boolean",
+                    "description": "Replace all occurrences (default: false, replaces only the first)",
+                })),
+            ],
+            vec!["filePath", "oldString", "newString"],
+        ),
+        tool_def(
+            "bash",
+            "Execute a PowerShell command on the system. Use for running scripts, installing packages, building projects, etc.",
+            vec![("command", string_param("The PowerShell command to execute"))],
+            vec!["command"],
+        ),
+        tool_def(
+            "grep",
+            "Search for a regex pattern across files in a directory. Returns matching lines with line numbers.",
+            vec![
+                ("pattern", string_param("The regex pattern to search for")),
+                ("path", string_param("Directory to search in (default: current directory)")),
+                ("include", string_param("Optional file extension filter (e.g. '*.rs', '*.js')")),
+            ],
+            vec!["pattern"],
+        ),
+        tool_def(
+            "glob",
+            "Find files matching a glob pattern. Use for listing files in a directory structure.",
+            vec![
+                ("pattern", string_param("The glob pattern (e.g. '**/*.rs', 'src/**/*.ts')")),
+                ("path", string_param("Base directory to search from")),
+            ],
+            vec!["pattern"],
+        ),
+    ]
+}

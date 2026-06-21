@@ -14,7 +14,10 @@ rust-version = "1.77.2"
 
 [lib]
 name = "omega_agent_lib"
-crate-type = ["lib"]
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
 serde_json = "1.0"
@@ -28,9 +31,14 @@ directories = "5"
 walkdir = "2"
 glob = "0.3"
 clap = { version = "4", features = ["derive"] }
+rpassword = "7"
 anyhow = "1"
 colored = "3"
 env_logger = "0.11"
+termcolor = "1.4"
+comfy-table = "7.1"
+tauri = { version = "2", features = ["tray-icon"] }
+reqwest = { version = "0.12", features = ["json"] }
 
 harness = { path = "crates/harness" }
 entropy = { path = "crates/entropy" }

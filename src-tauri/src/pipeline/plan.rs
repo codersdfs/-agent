@@ -93,6 +93,9 @@ impl PlanAgent {
             providers::ChatMessage {
                 role: "system".into(),
                 content: PLAN_SYSTEM_PROMPT.to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
             },
             providers::ChatMessage {
                 role: "user".into(),
@@ -101,6 +104,9 @@ impl PlanAgent {
                     task,
                     state.detected_language.lock().unwrap().label()
                 ),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
             },
         ];
 
@@ -108,6 +114,7 @@ impl PlanAgent {
             messages,
             config,
             stream: false,
+            tools: None,
         };
 
         let response = provider.chat(chat_request).await?;
@@ -141,6 +148,9 @@ impl PlanAgent {
             providers::ChatMessage {
                 role: "system".into(),
                 content: PLAN_SYSTEM_PROMPT.to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
             },
             providers::ChatMessage {
                 role: "user".into(),
@@ -149,6 +159,9 @@ impl PlanAgent {
                     task,
                     state.detected_language.lock().unwrap().label()
                 ),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
             },
         ];
 
@@ -158,6 +171,7 @@ impl PlanAgent {
             messages,
             config,
             stream: true,
+            tools: None,
         };
 
         tokio::spawn(async move {

@@ -1,7 +1,9 @@
 use crate::{ChatRequest, ChatResponse, LlmProvider, StreamChunk};
 
 pub struct GoogleProvider {
+    #[allow(dead_code)]
     api_key: String,
+    #[allow(dead_code)]
     base_url: String,
 }
 
