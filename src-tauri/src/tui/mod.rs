@@ -4,6 +4,7 @@ pub mod timeline;
 pub mod gate_table;
 pub mod diff_renderer;
 pub mod permission_prompt;
+pub mod markdown;
 
 pub use status_bar::StatusBar;
 pub use timeline::{Timeline, TimelineStep, StepStatus};

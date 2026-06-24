@@ -2,6 +2,93 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::ChatEmitter;
 use colored::Colorize;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const DIM: &str = "\x1b[2m";
+const RESET: &str = "\x1b[0m";
+
+static COST_INPUT: AtomicU64 = AtomicU64::new(0);
+static COST_OUTPUT: AtomicU64 = AtomicU64::new(0);
+static COST_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn cost_report() -> String {
+    format!(
+        "  {}cost: session total — {} in / {} out ({} messages){}",
+        DIM,
+        COST_INPUT.load(Ordering::Relaxed),
+        COST_OUTPUT.load(Ordering::Relaxed),
+        COST_COUNT.load(Ordering::Relaxed),
+        RESET,
+    )
+}
+
+fn record_cost(input: u32, output: u32) {
+    COST_INPUT.fetch_add(input as u64, Ordering::Relaxed);
+    COST_OUTPUT.fetch_add(output as u64, Ordering::Relaxed);
+    COST_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+enum Permission {
+    Allow,
+    Deny,
+    Abort,
+}
+
+async fn check_permission(mode: &str, tool: &str, _args: &str) -> Permission {
+    match mode {
+        "strict" => {
+            eprintln!("  {}{} denied (strict mode){}", DIM, tool, RESET);
+            Permission::Deny
+        }
+        "on" => {
+            use std::io::Write;
+            use tokio::io::AsyncBufReadExt;
+            let mut input = String::new();
+            let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+            loop {
+                eprint!("  Allow {}? (y/N/q): ", tool);
+                std::io::stderr().flush().ok();
+                input.clear();
+                if reader.read_line(&mut input).await.is_err() {
+                    return Permission::Deny;
+                }
+                match input.trim().to_lowercase().as_str() {
+                    "y" | "yes" => return Permission::Allow,
+                    "" | "n" | "no" => return Permission::Deny,
+                    "q" | "quit" => return Permission::Abort,
+                    _ => continue,
+                }
+            }
+        }
+        _ => Permission::Allow,
+    }
+}
+fn show_diff(path: &str, old: &str, new: &str) {
+    if old == new {
+        return;
+    }
+    eprintln!("  {} {} {}", "──", path, "──");
+    let diff = similar::TextDiff::from_lines(old, new);
+    for change in diff.iter_all_changes() {
+        let sign = match change.tag() {
+            similar::ChangeTag::Delete => "-",
+            similar::ChangeTag::Insert => "+",
+            similar::ChangeTag::Equal => " ",
+        };
+        let line = change.value().trim_end_matches('\n');
+        if line.is_empty() {
+            continue;
+        }
+        match change.tag() {
+            similar::ChangeTag::Equal => {
+                eprintln!("  {} {}{}{}", sign, DIM, line, RESET);
+            }
+            _ => {
+                eprintln!("  {} {}", sign, line);
+            }
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SendMessageRequest {
@@ -98,6 +185,8 @@ pub struct StreamMessageRequest {
     pub agent_type: String,
     pub provider: Option<providers::ProviderConfig>,
     pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub permission_mode: String,
 }
 
 pub async fn stream_message<E: ChatEmitter>(
@@ -160,7 +249,7 @@ pub async fn stream_message<E: ChatEmitter>(
             spinner.set_style(
                 indicatif::ProgressStyle::default_spinner()
                     .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
-                    .template("{spinner:.purple} {msg}")
+                    .template("{spinner} {msg}")
                     .unwrap(),
             );
             spinner.set_message("Thinking...");
@@ -168,6 +257,7 @@ pub async fn stream_message<E: ChatEmitter>(
 
             let mut streaming_text = false;
             let mut tool_call_deltas: Vec<(usize, String, String)> = vec![];
+            let mut last_usage: Option<providers::Usage> = None;
 
             while let Some(chunk) = rx.recv().await {
                 if !chunk.content.is_empty() {
@@ -205,6 +295,7 @@ pub async fn stream_message<E: ChatEmitter>(
                 }
 
                 if chunk.done {
+                    last_usage = chunk.usage;
                     break;
                 }
             }
@@ -231,13 +322,37 @@ pub async fn stream_message<E: ChatEmitter>(
                     name: None,
                 }];
                 for tc in &tool_calls {
-                    eprintln!("  {} {} {}", "⚡".green(), tc.function.name.bold(), tc.function.arguments.dimmed());
+                    eprintln!("  {} {} {}", "▶", tc.function.name.bold(), tc.function.arguments.dimmed());
                     let tool_request = crate::commands::tools::ToolRequest {
                         tool: tc.function.name.clone(),
                         args: serde_json::from_str(&tc.function.arguments)
                             .unwrap_or(serde_json::Value::Null),
                     };
+                    let diff_path = if matches!(tc.function.name.as_str(), "write" | "edit") {
+                        tool_request.args.get("filePath").and_then(|v| v.as_str()).map(|p| p.to_string())
+                    } else {
+                        None
+                    };
+                    let old = diff_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+                    match check_permission(&request.permission_mode, &tc.function.name, &tc.function.arguments).await {
+                        Permission::Allow => {}
+                        Permission::Deny => {
+                            messages.push(providers::ChatMessage {
+                                role: "tool".into(),
+                                content: format!("Tool `{}` was denied by permission mode", tc.function.name),
+                                tool_calls: None,
+                                tool_call_id: Some(tc.id.clone()),
+                                name: Some(tc.function.name.clone()),
+                            });
+                            continue;
+                        }
+                        Permission::Abort => return Err("Message aborted by user".into()),
+                    }
                     let result = crate::commands::tools::execute_tool_inner(state, tool_request).await?;
+                    if let Some(ref path) = diff_path {
+                        let new = std::fs::read_to_string(path).unwrap_or_default();
+                        show_diff(path, &old, &new);
+                    }
                     messages.push(providers::ChatMessage {
                         role: "tool".into(),
                         content: result.output,
@@ -250,6 +365,10 @@ pub async fn stream_message<E: ChatEmitter>(
             }
 
             emitter.emit_done(&full_response)?;
+            if let Some(ref u) = last_usage {
+                record_cost(u.input_tokens, u.output_tokens);
+                eprintln!("  {}tokens: {} in / {} out{}", DIM, u.input_tokens, u.output_tokens, RESET);
+            }
             return Ok(full_response);
         } else {
             let provider = providers::create_provider(&config)?;
@@ -258,7 +377,7 @@ pub async fn stream_message<E: ChatEmitter>(
             spinner.set_style(
                 indicatif::ProgressStyle::default_spinner()
                     .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
-                    .template("{spinner:.purple} {msg}")
+                    .template("{spinner} {msg}")
                     .unwrap(),
             );
             spinner.set_message("Thinking...");
@@ -283,13 +402,37 @@ pub async fn stream_message<E: ChatEmitter>(
                     name: None,
                 }];
                 for tc in &tool_calls {
-                    eprintln!("  {} {} {}", "⚡".green(), tc.function.name.bold(), tc.function.arguments.dimmed());
+                    eprintln!("  {} {} {}", "▶", tc.function.name.bold(), tc.function.arguments.dimmed());
                     let tool_request = crate::commands::tools::ToolRequest {
                         tool: tc.function.name.clone(),
                         args: serde_json::from_str(&tc.function.arguments)
                             .unwrap_or(serde_json::Value::Null),
                     };
+                    let diff_path = if matches!(tc.function.name.as_str(), "write" | "edit") {
+                        tool_request.args.get("filePath").and_then(|v| v.as_str()).map(|p| p.to_string())
+                    } else {
+                        None
+                    };
+                    let old = diff_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+                    match check_permission(&request.permission_mode, &tc.function.name, &tc.function.arguments).await {
+                        Permission::Allow => {}
+                        Permission::Deny => {
+                            messages.push(providers::ChatMessage {
+                                role: "tool".into(),
+                                content: format!("Tool `{}` was denied by permission mode", tc.function.name),
+                                tool_calls: None,
+                                tool_call_id: Some(tc.id.clone()),
+                                name: Some(tc.function.name.clone()),
+                            });
+                            continue;
+                        }
+                        Permission::Abort => return Err("Message aborted by user".into()),
+                    }
                     let result = crate::commands::tools::execute_tool_inner(state, tool_request).await?;
+                    if let Some(ref path) = diff_path {
+                        let new = std::fs::read_to_string(path).unwrap_or_default();
+                        show_diff(path, &old, &new);
+                    }
                     messages.push(providers::ChatMessage {
                         role: "tool".into(),
                         content: result.output,
@@ -306,6 +449,10 @@ pub async fn stream_message<E: ChatEmitter>(
                 full_response.push_str(&response.content);
             }
             emitter.emit_done(&full_response)?;
+            if let Some(ref u) = response.usage {
+                record_cost(u.input_tokens, u.output_tokens);
+                eprintln!("  {}tokens: {} in / {} out{}", DIM, u.input_tokens, u.output_tokens, RESET);
+            }
             return Ok(full_response);
         }
     }

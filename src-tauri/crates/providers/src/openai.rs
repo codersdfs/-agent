@@ -105,6 +105,7 @@ struct StreamChoice {
 struct StreamEvent {
     choices: Vec<StreamChoice>,
     model: Option<String>,
+    usage: Option<OpenAIUsage>,
 }
 
 pub struct OpenAIProvider {
@@ -296,11 +297,15 @@ impl LlmProvider for OpenAIProvider {
                                 }).collect()
                             });
 
+                            let usage = event.usage.as_ref().map(|u| crate::Usage {
+                                input_tokens: u.prompt_tokens,
+                                output_tokens: u.completion_tokens,
+                            });
                             let _ = tx.send(StreamChunk {
                                 content,
                                 done: is_done,
                                 model: event.model.clone(),
-                                usage: None,
+                                usage,
                                 delta_tool_calls,
                             });
                             if is_done {

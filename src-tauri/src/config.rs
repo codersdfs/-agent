@@ -6,6 +6,8 @@ pub struct CliConfig {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 impl CliConfig {
@@ -23,10 +25,24 @@ impl CliConfig {
     }
 
     pub fn from_provider_config(cfg: &providers::ProviderConfig) -> Self {
+        let existing = Self::load_existing();
         Self {
             provider: Some(cfg.kind.to_string()),
             model: Some(cfg.model.clone()),
             base_url: cfg.base_url.clone(),
+            permission_mode: existing.permission_mode,
+        }
+    }
+
+    fn load_existing() -> Self {
+        let path = config_path();
+        if path.exists() {
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default()
+        } else {
+            Self::default()
         }
     }
 }
