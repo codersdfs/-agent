@@ -1,5 +1,0 @@
-{
-  "name": "filesystem",
-  "description": "Read, write, and manage files in the project directory",
-  "endpoint": "http://localhost:8080/mcp"
-}
